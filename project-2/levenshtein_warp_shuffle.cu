@@ -24,7 +24,7 @@ namespace cg = cooperative_groups;
 
 // Maksymalne rozmiary danych
 const int MAX_ALPHABET_SIZE = 100;
-const int MAX_WORD_SIZE = 2000;
+const int MAX_WORD_SIZE = 2047;
 
 __device__ void sleep_milliseconds(unsigned int ms) {
     // Get the GPU clock frequency (in kHz)
@@ -260,12 +260,13 @@ int main(int argc, char *argv[]) {
     }
 
     /* stworzenie tablic do kopiowania */
-    int X[a_len * (n+1)] = {0};
-    char Q[a_len];
+    int* X = new int[a_len * (n + 1)];
+    std::memset(X, 0, (a_len*(n+1)) * sizeof(int));
+    char* Q = new char[a_len];
     for(int i = 0; i < a_len; i++) Q[i] = A_read[i]; 
-    char T[n];
+    char* T = new char[n];
     for(int i = 0; i < n; i++) T[i] = T_read[i];
-    char P[m];
+    char* P = new char[m];
     for(int i = 0; i < m; i++) P[i] = P_read[i];
 
     /* WSKAZNIKI DO ZALOKOWANIA PAMIECI NA GPU */
@@ -327,7 +328,9 @@ int main(int argc, char *argv[]) {
 
     /* === TERAZ MACIERZ D === */
     // HOST
-    int D[(m + 1) * (n + 1)] = {0};
+    int* D = new int[(m + 1)*(n + 1)];
+    std::memset(D, 0, (m + 1)*(n + 1)*sizeof(int));
+
 
     // DEVICE POINTER
     int* d_D;
@@ -463,6 +466,20 @@ int main(int argc, char *argv[]) {
     // std::cout << "Słowo 1: " << T_read << " (dlugość: " << n << ")" << std::endl;
     // std::cout << "Słowo 2: " << P_read << " (dlugość: " << m << ")" << std::endl;
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
+
+    // === Zwolnienie pamięci na GPU
+    cudaFree(d_X);
+    cudaFree(d_Q);
+    cudaFree(d_T);
+    cudaFree(d_P);
+    cudaFree(d_D);
+
+    // === Zwolnienie pamięci na host (heap)
+    delete[] X;
+    delete[] Q;
+    delete[] T;
+    delete[] P;
+    delete[] D;
 
     return 0;
 }
