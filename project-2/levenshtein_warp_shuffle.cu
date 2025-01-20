@@ -24,7 +24,7 @@ namespace cg = cooperative_groups;
 
 // Maksymalne rozmiary danych
 const int MAX_ALPHABET_SIZE = 100;
-const int MAX_WORD_SIZE = 1024;
+const int MAX_WORD_SIZE = 2000;
 
 __device__ void sleep_milliseconds(unsigned int ms) {
     // Get the GPU clock frequency (in kHz)
@@ -105,30 +105,11 @@ __global__ void calculateDMatrixNaive(int* D, int *X, char *Q, char *T, char *P,
     const int threadIndex = blockIdx.x * blockDim.x + threadIdx.x;
     // kolumna ktora bedziemy przetwarzac
     const int j = threadIndex;
-    // const int i = 0;
 
-    // printf("Hello form thread %d, rows: %d\n", j, rows_D);
-    // grid.sync();
-    //__syncthreads();
-    // printf("Let's start calculations! Rows: %d\n", rows_D);
     if (j < cols_D) {
         for(int i = 0; i < rows_D; i++) {
-            // calculating l
-            // int l = -1;  // Initialize `l` to an invalid value
-            // char P_prev = (i > 0) ? P[i - 1] : -1; // Example: Get P[i-1] from T
-
-            // // Find P[i-1] in Q
-            // for (int k = 0; k < rows_X; k++) {
-            //     if (Q[k] == P_prev) {
-            //         l = k;  // Found the index
-            //         break;
-            //     }
-            // }
-
+            // ASSUMING THAT ALPHABET IS A-Z CAPITALS
             int l = (i > 0 && P[i - 1] >= 'A' && P[i - 1] <= 'Z') ? (P[i - 1] - 'A') : -1;
-
-            // THIS CALCULATES ASM MATRIX
-            // if(i == 0) { D[i * cols_D + j] = 0; }
 
             // THIS CALCULATES LEVENSHTEIN DISTANCE
             if(i == 0) { D[i * cols_D + j] = j; }
@@ -150,18 +131,6 @@ __global__ void calculateDMatrixNaive(int* D, int *X, char *Q, char *T, char *P,
                 ); 
             }
             grid.sync();
-            //__syncthreads();
-            //printf("Finished row %d from thread %d!\n", i, j);
-
-            // if(j == 0) {
-            //     printf("After %d-th iteration:\n", i);
-            //     for (int k = 0; k < rows_D; k++) {
-            //         for (int l = 0; l < cols_D; l++) {
-            //             printf("%d |", D[k * cols_D + l]);
-            //         }
-            //         printf("\n");
-            //     }
-            // }  
         }
     }
 }
@@ -183,21 +152,13 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
     // numer wątku w bloku
     int threadId = threadIndex % blockDim.x;
 
+     /* Deklaracja AVar, BVar, CVar, DVar */
     int AVar;
     int BVar;
     int CVar;
     int DVar;
     if (j < cols_D) {
-        /* Deklaracja AVar, BVar, CVar, DVar */
-        
         for(int i = 0; i < rows_D; i++) {
-            
-            // inicjalizacja pamięci wspoldzielonej miedzy watkami
-            // __shared__ int sharedData[blockDim.x]; // Adjust size as needed
-            
-            // if (i > 0)
-            //     sharedData[threadId] = 
-
             // Calculate l directly using ASCII values
             int l = (i > 0 && P[i - 1] >= 'A' && P[i - 1] <= 'Z') ? (P[i - 1] - 'A') : -1;
 
@@ -215,7 +176,7 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 else {
                     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                 }
-                
+
                 BVar = DVar;
                 CVar = D[(i - 1) * cols_D + X[l * cols_X + j] - 1];
                 
@@ -236,16 +197,6 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
             
             // synchronizujemy wszystkie watki w obrebie gridu
             grid.sync();
-
-            // if(j == 0) {
-            //     printf("After %d-th iteration:\n", i);
-            //     for (int k = 0; k < rows_D; k++) {
-            //         for (int l = 0; l < cols_D; l++) {
-            //             printf("%d |", D[k * cols_D + l]);
-            //         }
-            //         printf("\n");
-            //     }
-            // }  
         }
     }
 }
@@ -263,12 +214,16 @@ int main(int argc, char *argv[]) {
     int device_id = 0;
     cudaDeviceProp device_prop;
 
-    // Get properties of the device
-    cudaGetDeviceProperties(&device_prop, device_id);
+    size_t free_mem, total_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
 
-    // Print total global memory in MB
-    std::cout << "Device Name: " << device_prop.name << std::endl;
-    std::cout << "Total Global Memory: " << device_prop.totalGlobalMem / (1024.0 * 1024.0) << " MB" << std::endl;
+    // Get properties of the device
+    // cudaGetDeviceProperties(&device_prop, device_id);
+
+    // // Print total global memory in MB
+    // std::cout << "Device Name: " << device_prop.name << std::endl;
+    // std::cout << "Total Global Memory: " << device_prop.totalGlobalMem / (1024.0 * 1024.0) << " MB" << std::endl;
 
     // Pobieranie nazwy pliku z argumentów programu
     const char *filename = argv[1];
@@ -317,12 +272,16 @@ int main(int argc, char *argv[]) {
     char* d_T;
     char* d_P;
 
+    printf("[MEMCHECK] WORKS\n");
+
     /* TABLICA X */
     // Allocate memory on the device
     size_t size_X = a_len * (n + 1) * sizeof(int);
     cudaMalloc((void**)&d_X, size_X);
     // Copy the array from host to device
     cudaMemcpy(d_X, X, size_X, cudaMemcpyHostToDevice);
+
+    printf("[MEMCHECK] WORKS\n");
 
     /* ALFABET Q */
     size_t size_Q = a_len * sizeof(char);
@@ -342,8 +301,12 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     cudaMemcpy(d_P, P, size_P, cudaMemcpyHostToDevice);
 
+    printf("[MEMCHECK] WORKS\n");
+
     /* WYWOLUJEMY KERNEL DO OBLICZENIA MACIERZY X */
     calculateXMatrix<<<1, a_len>>>(d_X, d_Q, d_T, a_len, n + 1);
+
+    printf("[MEMCHECK] WORKS\n");
 
     /* SYNCHRONIZACJA */
     cudaDeviceSynchronize();
@@ -367,6 +330,9 @@ int main(int argc, char *argv[]) {
     // DEVICE POINTER
     int* d_D;
 
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("[MEMCHECK] WORKS\n");
+
     // ALOKUJEMY
     size_t size_D = (m + 1) * (n + 1) * sizeof(int);
     cudaMalloc((void**)&d_D, size_D);
@@ -381,6 +347,10 @@ int main(int argc, char *argv[]) {
     // Define grid and block dimensions
     int threadsPerBlock = n + 1; // As in your original kernel call
     int numBlocks = 1; // Single block, adjust if needed
+    if(n > 1023){
+        threadsPerBlock = 1024;
+        numBlocks = 2;
+    }
     dim3 grid(numBlocks);
     dim3 block(threadsPerBlock);
 
@@ -405,16 +375,10 @@ int main(int argc, char *argv[]) {
         &cols_X
     };
 
-    /* Launch the kernel using cudaLaunchCooperativeKernel */
-    // cudaError_t err = cudaLaunchCooperativeKernel(
-    //     (void*)calculateDMatrixNaive,
-    //     grid,
-    //     block,
-    //     kernelArgs,
-    //     sharedMemSize
-    //);
-
     printf("================= OUTPUT FROM ADVANCED KERNEL ===================\n");
+    
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
 
     cudaError_t err0 = cudaLaunchCooperativeKernel(
         (void*)calculateDMatrixAdvanced,
@@ -423,6 +387,9 @@ int main(int argc, char *argv[]) {
         kernelArgs,
         sharedMemSize
     );
+
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
 
     CHECK_CUDA_ERR(cudaDeviceSynchronize());
 
@@ -485,9 +452,9 @@ int main(int argc, char *argv[]) {
     // cudaDeviceSynchronize();
 
     // Wyświetlanie wyników
-    std::cout << "\nAlfabet: " << A_read << " (dlugość: " << a_len << ")" << std::endl;
-    std::cout << "Słowo 1: " << T_read << " (dlugość: " << n << ")" << std::endl;
-    std::cout << "Słowo 2: " << P_read << " (dlugość: " << m << ")" << std::endl;
+    // std::cout << "\nAlfabet: " << A_read << " (dlugość: " << a_len << ")" << std::endl;
+    // std::cout << "Słowo 1: " << T_read << " (dlugość: " << n << ")" << std::endl;
+    // std::cout << "Słowo 2: " << P_read << " (dlugość: " << m << ")" << std::endl;
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
 
     return 0;
