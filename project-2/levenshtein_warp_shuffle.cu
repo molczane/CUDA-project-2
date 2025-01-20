@@ -228,7 +228,8 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 }
 
                 BVar = DVar;
-                CVar = D[(i - 1) * cols_D + X[l * cols_X + j] - 1];
+                int X_l_j = X[l * cols_X + j];
+                CVar = D[(i - 1) * cols_D + X_l_j - 1];
                 
                 if(j == 0) {
                     DVar = i;
@@ -236,11 +237,11 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 else if (T[j - 1] == P[i - 1]) {
                     DVar = AVar;
                 }
-                else if (X[l * cols_X + j] == 0) {
+                else if (X_l_j == 0) {
                     DVar = 1 + min_of_three(AVar, BVar, i + j - 1);
                 }
                 else {
-                    DVar = 1 + min_of_three(AVar, BVar, CVar + (j - 1 - X[l * cols_X + j]));
+                    DVar = 1 + min_of_three(AVar, BVar, CVar + (j - 1 - X_l_j));
                 }
                 D[i * cols_D + j] = DVar;
             } 
@@ -423,16 +424,16 @@ int main(int argc, char *argv[]) {
 
     printf("================= OUTPUT FROM CPU ===================\n");
 
-    auto cpuStart = std::chrono::high_resolution_clock::now();
+    // auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
+    // int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
 
-    auto cpuEnd = std::chrono::high_resolution_clock::now();
+    // auto cpuEnd = std::chrono::high_resolution_clock::now();
 
-    auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
+    // auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
 
-    std::cout << "CPU Levenshtein distance = " << distance << "  (";
-    std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
+    // std::cout << "CPU Levenshtein distance = " << distance << "  (";
+    // std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
 
     printf("================= OUTPUT FROM ADVANCED KERNEL ===================\n");
     
