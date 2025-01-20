@@ -233,7 +233,7 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 
                 if(j == 0) {
                     DVar = i;
-                }
+                } 
                 else if (T[j - 1] == P[i - 1]) {
                     DVar = AVar;
                 }
@@ -243,6 +243,7 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 else {
                     DVar = 1 + min_of_three(AVar, BVar, CVar + (j - 1 - X_l_j));
                 }
+
                 D[i * cols_D + j] = DVar;
             } 
             
