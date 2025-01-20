@@ -214,9 +214,6 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
     // kolumna ktora bedziemy przetwarzac
     const int j = threadIndex;
 
-    // numer wątku w warpie
-    int laneId = threadIdx.x % warpSize; // Calculate lane ID
-
      /* Deklaracja AVar, BVar, CVar, DVar */
     int AVar;
     int BVar;
@@ -225,7 +222,8 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
     if (j < cols_D) {
         for(int i = 0; i < rows_D; i++) {
             // Calculate l directly using ASCII values
-            int l = (i > 0 && P[i - 1] >= 'A' && P[i - 1] <= 'Z') ? (P[i - 1] - 'A') : -1;
+            int P_prev = P[i - 1];
+            int l = (i > 0 && P_prev >= 'A' && P_prev <= 'Z') ? (P_prev - 'A') : -1;
             // int l = (i > 0 && sP[i - 1] >= 'A' && sP[i - 1] <= 'Z') 
             //             ? (sP[i - 1] - 'A') 
             //             : -1;
@@ -236,16 +234,16 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 DVar = j; 
             }
             else {
-                if(j == 0) {
+                if(j == 0 || j % warpSize != 0) {
                     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                 }   
                 else if(j % warpSize == 0) {
                     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
-                else {
-                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                }
+                // else {
+                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                // }
 
                 BVar = DVar;
                 int X_l_j = X[l * cols_X + j];
@@ -254,7 +252,7 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 if(j == 0) {
                     DVar = i;
                 } 
-                else if (T[j - 1] == P[i - 1]) {
+                else if (T[j - 1] == P_prev) {
                     DVar = AVar;
                 }
                 // else if (sT[j - 1] == sP[i - 1]) {
@@ -448,16 +446,16 @@ int main(int argc, char *argv[]) {
 
     printf("================= OUTPUT FROM CPU ===================\n");
 
-    // auto cpuStart = std::chrono::high_resolution_clock::now();
+    auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    // int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
+    int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
 
-    // auto cpuEnd = std::chrono::high_resolution_clock::now();
+    auto cpuEnd = std::chrono::high_resolution_clock::now();
 
-    // auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
+    auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
 
-    // std::cout << "CPU Levenshtein distance = " << distance << "  (";
-    // std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
+    std::cout << "CPU Levenshtein distance = " << distance << "  (";
+    std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
 
     printf("================= OUTPUT FROM ADVANCED KERNEL ===================\n");
     
