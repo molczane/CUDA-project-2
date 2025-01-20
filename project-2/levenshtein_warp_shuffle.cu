@@ -185,6 +185,33 @@ __global__ void calculateDMatrixNaive(int* D, int *X, char *Q, char *T, char *P,
 
 /* ======================= CALCULATE D MATRIX KERNEL ADVANCED ========================= */
 __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
+    // For dynamic shared memory, we must specify 'extern __shared__':
+    // extern __shared__ char s[];
+
+    // // We'll store T in sT and P in sP, laid out back-to-back
+    // char* sT = &s[0];      // covers indices [0..n-1]
+    // char* sP = &s[cols_D];      // covers indices [n..n+m-1]
+
+    // // 1) Copy T and P from global memory into shared memory
+    // //    We'll do it in a loop so multiple threads help copy.
+    // int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // int blockSize = blockDim.x;
+
+    // // Copy T into sT
+    // while (tid < cols_D - 1) {
+    //     sT[tid] = T[tid]; 
+    //     tid += blockSize;
+    // }
+    // // Reset tid for P
+    // tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // while (tid < rows_D - 1) {
+    //     sP[tid] = P[tid];
+    //     tid += blockSize;
+    // }
+
+    // // Sync so that sT and sP are fully loaded before use
+    // __syncthreads();
+
     /* PREPARATION OF NEEDED DATA */
     cg::grid_group grid = cg::this_grid();
     const int threadIndex = blockIdx.x * blockDim.x + threadIdx.x;
@@ -208,6 +235,9 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
         for(int i = 0; i < rows_D; i++) {
             // Calculate l directly using ASCII values
             int l = (i > 0 && P[i - 1] >= 'A' && P[i - 1] <= 'Z') ? (P[i - 1] - 'A') : -1;
+            // int l = (i > 0 && sP[i - 1] >= 'A' && sP[i - 1] <= 'Z') 
+            //             ? (sP[i - 1] - 'A') 
+            //             : -1;
 
             // THIS CALCULATES LEVENSHTEIN DISTANCE
             if(i == 0) { 
@@ -237,6 +267,9 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 else if (T[j - 1] == P[i - 1]) {
                     DVar = AVar;
                 }
+                // else if (sT[j - 1] == sP[i - 1]) {
+                //     DVar = AVar;
+                // }
                 else if (X_l_j == 0) {
                     DVar = 1 + min_of_three(AVar, BVar, i + j - 1);
                 }
@@ -403,7 +436,7 @@ int main(int argc, char *argv[]) {
     dim3 block(threadsPerBlock);
 
     // Define shared memory size (if required, set appropriately)
-    size_t sharedMemSize = 0;
+    size_t sharedMemSize = 48000;
 
     int rows_D = m + 1;
     int cols_D = n + 1;
