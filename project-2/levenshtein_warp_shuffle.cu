@@ -186,31 +186,27 @@ __global__ void calculateDMatrixNaive(int* D, int *X, char *Q, char *T, char *P,
 /* ======================= CALCULATE D MATRIX KERNEL ADVANCED ========================= */
 __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
     // For dynamic shared memory, we must specify 'extern __shared__':
-    // extern __shared__ char s[];
+    extern __shared__ char s[];
 
     // // We'll store T in sT and P in sP, laid out back-to-back
-    // char* sT = &s[0];      // covers indices [0..n-1]
-    // char* sP = &s[cols_D];      // covers indices [n..n+m-1]
+    char* sT = &s[0];      // covers indices [0..n-1]
+    char* sP = &s[cols_D - 1];      // covers indices [n..n+m-1]
 
-    // // 1) Copy T and P from global memory into shared memory
-    // //    We'll do it in a loop so multiple threads help copy.
-    // int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    // int blockSize = blockDim.x;
+    // 1) Copy T and P from global memory into shared memory
+    //    We'll do it in a loop so multiple threads help copy.
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // // Copy T into sT
-    // while (tid < cols_D - 1) {
-    //     sT[tid] = T[tid]; 
-    //     tid += blockSize;
-    // }
-    // // Reset tid for P
-    // tid = blockIdx.x * blockDim.x + threadIdx.x;
-    // while (tid < rows_D - 1) {
-    //     sP[tid] = P[tid];
-    //     tid += blockSize;
-    // }
+    // Copy T into sT
+    if(tid < cols_D - 1) {
+        sT[tid] = T[tid]; 
+    }
 
-    // // Sync so that sT and sP are fully loaded before use
-    // __syncthreads();
+    if(tid < rows_D - 1) {
+        sP[tid] = P[tid];
+    }
+
+    // Sync so that sT and sP are fully loaded before use
+    __syncthreads();
 
     /* PREPARATION OF NEEDED DATA */
     cg::grid_group grid = cg::this_grid();
@@ -220,11 +216,6 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
 
     // numer wątku w warpie
     int laneId = threadIdx.x % warpSize; // Calculate lane ID
-    
-    int w = laneId;
-
-    // numer wątku w bloku
-    int threadId = threadIndex % blockDim.x;
 
      /* Deklaracja AVar, BVar, CVar, DVar */
     int AVar;
@@ -245,7 +236,6 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 DVar = j; 
             }
             else {
-                
                 if(j == 0) {
                     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                 }   
