@@ -84,9 +84,11 @@ __global__ void calculateXMatrix(int *X, char *Q, char *T, int row_number, int c
     /* FOR LOOP */
     if(threadIndex < row_number) {
         for(int j = 0; j < col_number; j++) {
-            if(j == 0) { X[baseFlattenIndex + j] = 0; }
-            else if(T[j - 1] == Q[i]) { X[baseFlattenIndex + j] = j; }
-            else { X[baseFlattenIndex + j] = X[baseFlattenIndex + j - 1]; }
+            if(baseFlattenIndex + j < col_number) {
+                if(j == 0) { X[baseFlattenIndex + j] = 0; }
+                else if(T[j - 1] == Q[i]) { X[baseFlattenIndex + j] = j; }
+                else { X[baseFlattenIndex + j] = X[baseFlattenIndex + j - 1]; }
+            }
         }
     }
 }
@@ -335,10 +337,15 @@ int main(int argc, char *argv[]) {
 
     // ALOKUJEMY
     size_t size_D = (m + 1) * (n + 1) * sizeof(int);
-    cudaMalloc((void**)&d_D, size_D);
+    cudaError_t err1 = cudaMalloc((void**)&d_D, size_D);
+    if (err1 != cudaSuccess) {
+        std::cerr << "Failed to allocate memory: " << cudaGetErrorString(err1) << std::endl;
+        return 1;
+    }
     // Copy the array from host to device
-    cudaMemcpy(d_D, D, size_D, cudaMemcpyHostToDevice);
+    CHECK_CUDA_ERR(cudaMemcpy(d_D, D, size_D, cudaMemcpyHostToDevice));
 
+    printf("[MEMCHECK] WORKS\n");
     // (int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X)
     /* LAUNCHING NORMAL KERNEL */
     // calculateDMatrixNaive<<<1, n+1>>>(d_D, d_X, d_Q, d_T, d_P, m+1, n+1, a_len, n+1);
