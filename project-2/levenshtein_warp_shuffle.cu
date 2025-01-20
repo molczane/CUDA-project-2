@@ -4,8 +4,13 @@
 #include <fstream>
 #include <cstring>
 #include <algorithm>
+#include <chrono> 
 
 namespace cg = cooperative_groups;
+
+// Maksymalne rozmiary danych
+const int MAX_ALPHABET_SIZE = 100;
+const int MAX_WORD_SIZE = 25200;
 
 // --------------------------------------------------------------------------- // 
 //                     Error-checking macro for CUDA calls                     //
@@ -20,57 +25,6 @@ namespace cg = cooperative_groups;
             exit(EXIT_FAILURE);                                \
         }                                                      \
     } while (0)
-
-
-// Maksymalne rozmiary danych
-const int MAX_ALPHABET_SIZE = 100;
-const int MAX_WORD_SIZE = 2047;
-
-__device__ void sleep_milliseconds(unsigned int ms) {
-    // Get the GPU clock frequency (in kHz)
-    unsigned long long int start = clock64();
-    unsigned long long int wait_cycles = ms * (1000000); // Convert ms to nanoseconds
-
-    // Busy-wait loop
-    while ((clock64() - start) < wait_cycles) {
-        // Do nothing, just loop
-    }
-}
-
-/* ========================= EXAMPLE FUNCTIONS ============================= */
-__global__ void shfl_up_example() {
-    int x = threadIdx.x; // Each thread initializes its own value
-    int y = __shfl_up_sync(0xFFFFFFFF, x, 1); // Shift up by 1 with full mask
-
-    int laneId = threadIdx.x % warpSize; // Calculate lane ID
-
-    if (laneId >= 1) { // Only valid for threads where laneId >= 1
-        printf("Thread %d: x = %d, y (from thread %d) = %d\n", threadIdx.x, x, threadIdx.x - 1, y);
-    } else {
-        printf("Thread %d: x = %d, y = Undefined\n", threadIdx.x, x);
-    }
-}
-
-__global__ void example_warp_shuffle_kernel() {
-    cg::grid_group grid = cg::this_grid();
-
-    const int threadIndex = blockIdx.x * blockDim.x + threadIdx.x;
-    const int warpIndex = threadIdx.x / warpSize;
-    const int laneIndex = threadIdx.x % warpSize;
-    sleep_milliseconds(threadIndex * 100);
-    printf("Thread Index: %d\n", threadIndex);
-    //__syncthreads();
-    grid.sync();
-    sleep_milliseconds(threadIndex * 100);
-    printf("Warp Index: %d\n", warpIndex);
-    //__syncthreads();
-    grid.sync();
-    sleep_milliseconds(threadIndex * 100);
-    printf("Lane Index: %d\n", laneIndex);
-    //__syncthreads();
-    grid.sync();
-    printf("Warp Size: %d\n", warpSize);
-}
 /* ======================================================================== */
 
 /* ============================ CALCULATE X MATRIX KERNEL ============================= */
@@ -95,10 +49,101 @@ __global__ void calculateXMatrix(int *X, char *Q, char *T, int row_number, int c
 /* ==================================================================================== */
 
 /* ==================== HELPER FUNCTIONS =====================*/
+// GPU
 __device__ int min_of_three(int a, int b, int c) {
     return min(min(a, b), c);
 }
+// CPU
+static inline int min_of_three_cpu(int a, int b, int c) {
+    return std::min(a, std::min(b, c));
+}
 /* ============================================================*/
+
+/* ========================= LEVENSHTEIN DISTANCE ON CPU ============================= */
+int levenshteinNaiveCPU(
+    const char* T, int n,
+    const char* P, int m,
+    const int* X, int a_len, 
+    int colsX  // (n+1)
+)
+{
+    // We'll create a local 2D array D of size (m+1) x (n+1).
+    // For large n, m, consider using new[] or std::vector to avoid large stack usage.
+    int* D = new int[(m + 1) * (n + 1)];
+
+    // Initialize D with 0s
+    std::memset(D, 0, sizeof(int) * (m+1) * (n+1));
+
+    // Fill in row 0: D[0, j] = j
+    for(int j = 0; j <= n; j++) {
+        D[0 * (n+1) + j] = j;
+    }
+    // Fill in col 0: D[i, 0] = i
+    for(int i = 0; i <= m; i++) {
+        D[i * (n+1) + 0] = i;
+    }
+
+    // Now compute the Levenshtein distance with the same logic as your naive CUDA kernel
+    for(int i = 1; i <= m; i++) {
+        // Convert P[i-1] to index l if it is [A-Z], else -1
+        char pChar = P[i-1];
+        int l = -1;
+        if(pChar >= 'A' && pChar <= 'Z') {
+            l = pChar - 'A';  // e.g. 'A'->0, 'B'->1, ...
+        }
+
+        for(int j = 1; j <= n; j++) {
+            if(T[j - 1] == P[i - 1]) {
+                // Same character => no additional cost
+                D[i * (n+1) + j] = D[(i - 1) * (n+1) + (j - 1)];
+            }
+            else {
+                // If P[i-1] is outside 'A'..'Z', then l = -1 => skip X usage
+                if(l < 0) {
+                    // Then we can't use X for last occurrence => fallback
+                    D[i * (n+1) + j] = 
+                        1 + min_of_three_cpu(
+                              D[(i - 1)*(n+1) + j],     // deletion
+                              D[(i - 1)*(n+1) + (j-1)], // substitution
+                              D[i*(n+1) + (j-1)]        // insertion
+                          ); 
+                }
+                else {
+                    // We do have l in [0 .. a_len-1], so we can check X[l, j].
+                    int lastOcc = X[l * colsX + j];  // X[l,j]
+                    if(lastOcc == 0) {
+                        // then use the 'i+j-1' fallback
+                        D[i * (n+1) + j] = 
+                            1 + min_of_three_cpu(
+                                  D[(i - 1)*(n+1) + j],
+                                  D[(i - 1)*(n+1) + (j - 1)],
+                                  (i + j - 1)
+                              );
+                    }
+                    else {
+                        // Note the same formula from the kernel
+                        int bigTerm = D[(i - 1)*(n+1) + (lastOcc - 1)]
+                                      + ((j - 1) - lastOcc);
+                        D[i * (n+1) + j] = 
+                            1 + min_of_three_cpu(
+                                  D[(i - 1)*(n+1) + j],
+                                  D[(i - 1)*(n+1) + (j - 1)],
+                                  bigTerm
+                              );
+                    }
+                }
+            }
+        }
+    }
+
+    // The Levenshtein distance is in the bottom-right corner of D
+    int distance = D[m * (n+1) + n];
+
+    // Clean up
+    delete[] D;
+    return distance;
+}
+/* =================================================================================== */
 
 /* ============================ CALCULATE D MATRIX KERNEL ============================= */
 __global__ void calculateDMatrixNaive(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
@@ -170,8 +215,11 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                 DVar = j; 
             }
             else {
-
-                if(j % warpSize == 0) {
+                
+                if(j == 0) {
+                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                }   
+                else if(j % warpSize == 0) {
                     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
@@ -221,11 +269,11 @@ int main(int argc, char *argv[]) {
     printf("Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
 
     // Get properties of the device
-    // cudaGetDeviceProperties(&device_prop, device_id);
+    cudaGetDeviceProperties(&device_prop, device_id);
 
-    // // Print total global memory in MB
-    // std::cout << "Device Name: " << device_prop.name << std::endl;
-    // std::cout << "Total Global Memory: " << device_prop.totalGlobalMem / (1024.0 * 1024.0) << " MB" << std::endl;
+    // Print total global memory in MB
+    std::cout << "Device Name: " << device_prop.name << std::endl;
+    std::cout << "Total Global Memory: " << device_prop.totalGlobalMem / (1024.0 * 1024.0) << " MB" << std::endl;
 
     // Pobieranie nazwy pliku z argumentów programu
     const char *filename = argv[1];
@@ -275,16 +323,12 @@ int main(int argc, char *argv[]) {
     char* d_T;
     char* d_P;
 
-    printf("[MEMCHECK] WORKS\n");
-
     /* TABLICA X */
     // Allocate memory on the device
     size_t size_X = a_len * (n + 1) * sizeof(int);
     cudaMalloc((void**)&d_X, size_X);
     // Copy the array from host to device
     cudaMemcpy(d_X, X, size_X, cudaMemcpyHostToDevice);
-
-    printf("[MEMCHECK] WORKS\n");
 
     /* ALFABET Q */
     size_t size_Q = a_len * sizeof(char);
@@ -304,27 +348,16 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     cudaMemcpy(d_P, P, size_P, cudaMemcpyHostToDevice);
 
-    printf("[MEMCHECK] WORKS\n");
+    //printf("[MEMCHECK] WORKS\n");
 
     /* WYWOLUJEMY KERNEL DO OBLICZENIA MACIERZY X */
     calculateXMatrix<<<1, a_len>>>(d_X, d_Q, d_T, a_len, n + 1);
-
-    printf("[MEMCHECK] WORKS\n");
 
     /* SYNCHRONIZACJA */
     cudaDeviceSynchronize();
 
     /* KOPIUJEMY PAMIEC */
     cudaMemcpy(X, d_X, size_X, cudaMemcpyDeviceToHost);
-
-    /* TESTOWE WYPISANIE X */
-    // std::cout << std::endl << "Tablica X po obliczeniu:" << std::endl;
-    // for (int i = 0; i < a_len; i++) {
-    //     for (int j = 0; j < n + 1; j++) {
-    //         std::cout << X[i * (n + 1) + j] << "|";
-    //     }
-    //     std::cout << std::endl;
-    // }
 
     /* === TERAZ MACIERZ D === */
     // HOST
@@ -336,7 +369,6 @@ int main(int argc, char *argv[]) {
     int* d_D;
 
     cudaMemGetInfo(&free_mem, &total_mem);
-    printf("[MEMCHECK] WORKS\n");
 
     // ALOKUJEMY
     size_t size_D = (m + 1) * (n + 1) * sizeof(int);
@@ -348,19 +380,23 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     CHECK_CUDA_ERR(cudaMemcpy(d_D, D, size_D, cudaMemcpyHostToDevice));
 
-    printf("[MEMCHECK] WORKS\n");
-    // (int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X)
-    /* LAUNCHING NORMAL KERNEL */
-    // calculateDMatrixNaive<<<1, n+1>>>(d_D, d_X, d_Q, d_T, d_P, m+1, n+1, a_len, n+1);
 
     /* ====================== LAUNCHING COOPERATIVE KERNEL ======================== */
-    // Define grid and block dimensions
-    int threadsPerBlock = n + 1; // As in your original kernel call
-    int numBlocks = 1; // Single block, adjust if needed
-    if(n > 1023){
-        threadsPerBlock = 1024;
-        numBlocks = 2;
-    }
+    // We'll assume we need (n + 1) total threads:
+    int totalThreads = n + 1;
+
+    // Typical maximum block size on many GPUs is 1024
+    int maxBlockSize = 1024;
+
+    // threadsPerBlock is the smaller of (totalThreads) and maxBlockSize
+    int threadsPerBlock = (totalThreads < maxBlockSize) ? totalThreads : maxBlockSize;
+
+    // Compute how many blocks we need so that
+    // (blocks * threadsPerBlock) >= totalThreads
+    int numBlocks = (totalThreads + threadsPerBlock - 1) / threadsPerBlock;
+
+    printf("Blocks: %d, Threads per block: %d\n", numBlocks, threadsPerBlock);
+
     dim3 grid(numBlocks);
     dim3 block(threadsPerBlock);
 
@@ -385,10 +421,31 @@ int main(int argc, char *argv[]) {
         &cols_X
     };
 
+    printf("================= OUTPUT FROM CPU ===================\n");
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
+    int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
+
+    auto cpuEnd = std::chrono::high_resolution_clock::now();
+
+    auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
+
+    std::cout << "CPU Levenshtein distance = " << distance << "  (";
+    std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
+
     printf("================= OUTPUT FROM ADVANCED KERNEL ===================\n");
     
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
+
+    // Create CUDA events
+    cudaEvent_t startAdv, stopAdv;
+    cudaEventCreate(&startAdv);
+    cudaEventCreate(&stopAdv);
+
+    // Record the start event
+    cudaEventRecord(startAdv);
 
     cudaError_t err0 = cudaLaunchCooperativeKernel(
         (void*)calculateDMatrixAdvanced,
@@ -398,16 +455,26 @@ int main(int argc, char *argv[]) {
         sharedMemSize
     );
 
-    cudaMemGetInfo(&free_mem, &total_mem);
-    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
+    // Synchronize to make sure the kernel finishes
+    cudaEventRecord(stopAdv);
+    cudaEventSynchronize(stopAdv);
 
+    CHECK_CUDA_ERR(cudaGetLastError());
     CHECK_CUDA_ERR(cudaDeviceSynchronize());
+
+    float advancedKernelTimeMs = 0.0f;
+    cudaEventElapsedTime(&advancedKernelTimeMs, startAdv, stopAdv);
 
     /* KOPIUJEMY PAMIEC */
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
 
     // Wyświetlanie wyników
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
+    std::cout << "   (Time: " << advancedKernelTimeMs << " ms)" << std::endl;
+
+    // Cleanup events
+    cudaEventDestroy(startAdv);
+    cudaEventDestroy(stopAdv);
 
     /* WYZEROWANIE TABLICY D */
     for (int i = 0; i < m + 1; i++) {
@@ -416,8 +483,14 @@ int main(int argc, char *argv[]) {
         }
     }
 
-
     printf("================= OUTPUT FROM NAIVE KERNEL ===================\n");
+
+    cudaEvent_t startNaive, stopNaive;
+    cudaEventCreate(&startNaive);
+    cudaEventCreate(&stopNaive);
+
+    cudaEventRecord(startNaive);
+
     /* Launch the kernel using cudaLaunchCooperativeKernel */
     cudaError_t err = cudaLaunchCooperativeKernel(
         (void*)calculateDMatrixNaive,
@@ -432,40 +505,28 @@ int main(int argc, char *argv[]) {
         std::cerr << "Kernel launch failed: " << cudaGetErrorString(err) << std::endl;
     }
 
+    cudaEventRecord(stopNaive);
+    cudaEventSynchronize(stopNaive);
+
     /* SYNCHRONIZACJA I SPRAWDZENIE BLEDOW */
     CHECK_CUDA_ERR(cudaGetLastError());
     CHECK_CUDA_ERR(cudaDeviceSynchronize());
 
+    float naiveKernelTimeMs = 0.0f;
+    cudaEventElapsedTime(&naiveKernelTimeMs, startNaive, stopNaive);
+
     /* KOPIUJEMY PAMIEC */
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
-
-    /* TESTOWE WYPISANIE D */
-    // std::cout << std::endl << "Po obliczeniu tablicy D:" << std::endl;
-    // for (int i = 0; i < m + 1; i++) {
-    //     for (int j = 0; j < n + 1; j++) {
-    //         std::cout << D[i * (n + 1) + j] << "|";
-    //     }
-    //     std::cout << std::endl;
-    // }
-
-    //example_warp_shuffle_kernel<<<2, 64>>>();
-
-    // void* kernel_args[] = {};
-    // cudaLaunchCooperativeKernel((void*)example_warp_shuffle_kernel, 1, 32, kernel_args);
-
-    // cudaDeviceSynchronize();
-
-    // Launch kernel
-    // shfl_up_example<<<1, 32>>>();
-
-    // // Wait for GPU to finish
-    // cudaDeviceSynchronize();
 
     // Wyświetlanie wyników
     // std::cout << "\nAlfabet: " << A_read << " (dlugość: " << a_len << ")" << std::endl;
     // std::cout << "Słowo 1: " << T_read << " (dlugość: " << n << ")" << std::endl;
     // std::cout << "Słowo 2: " << P_read << " (dlugość: " << m << ")" << std::endl;
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
+    std::cout << "   (Time: " << naiveKernelTimeMs << " ms)" << std::endl;
+
+    cudaEventDestroy(startNaive);
+    cudaEventDestroy(stopNaive);
 
     // === Zwolnienie pamięci na GPU
     cudaFree(d_X);
