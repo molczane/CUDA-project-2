@@ -185,6 +185,69 @@ __global__ void calculateDMatrixNaive(int* D, int *X, char *Q, char *T, char *P,
 
 /* ======================= CALCULATE D MATRIX KERNEL ADVANCED ========================= */
 __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
+    /* PREPARATION OF NEEDED DATA */
+    cg::grid_group grid = cg::this_grid();
+    const int threadIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    // kolumna ktora bedziemy przetwarzac
+    const int j = threadIndex;
+
+     /* Deklaracja AVar, BVar, CVar, DVar */
+    int AVar;
+    int BVar;
+    int CVar;
+    int DVar;
+    if (j < cols_D) {
+        for(int i = 0; i < rows_D; i++) {
+            // Calculate l directly using ASCII values
+            int P_prev = P[i - 1];
+            int l = (i > 0 && P_prev >= 'A' && P_prev <= 'Z') ? (P_prev - 'A') : -1;
+
+            // THIS CALCULATES LEVENSHTEIN DISTANCE
+            if(i == 0) { 
+                D[i * cols_D + j] = j;
+                DVar = j; 
+            }
+            else {
+                if(j == 0 || j % warpSize != 0) {
+                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                }   
+                else if(j % warpSize == 0) {
+                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                    AVar = D[(i - 1) * cols_D + (j - 1)];
+                }
+                // else {
+                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                // }
+
+                BVar = DVar;
+                int X_l_j = X[l * cols_X + j];
+                CVar = D[(i - 1) * cols_D + X_l_j - 1];
+                
+                if(j == 0) {
+                    DVar = i;
+                } 
+                else if (T[j - 1] == P_prev) {
+                    DVar = AVar;
+                }
+                else if (X_l_j == 0) {
+                    DVar = 1 + min_of_three(AVar, BVar, i + j - 1);
+                }
+                else {
+                    DVar = 1 + min_of_three(AVar, BVar, CVar + (j - 1 - X_l_j));
+                }
+
+                D[i * cols_D + j] = DVar;
+            } 
+            
+            // synchronizujemy wszystkie watki w obrebie gridu
+            grid.sync();
+        }
+    }
+}
+/* ==================================================================================== */
+
+/* ======================= CALCULATE D MATRIX WITH SHARED MEMORY ========================= */
+__global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
     // For dynamic shared memory, we must specify 'extern __shared__':
     extern __shared__ char s[];
 
