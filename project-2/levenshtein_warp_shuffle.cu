@@ -12,7 +12,7 @@ namespace cg = cooperative_groups;
 const int MAX_ALPHABET_SIZE = 100;
 const int MAX_WORD_SIZE = 25200;
 const int THREADS_PER_BLOCK = 1024;
-const int INSERT = 1, DELETE = 2, REPLACE = 3, MATCH = 0;
+const int INSERT = 1, DELETE = 2, REPLACE = 3, MATCH = 0, JUMP = 4;
 
 // --------------------------------------------------------------------------- // 
 //                     Error-checking macro for CUDA calls                     //
@@ -40,11 +40,9 @@ __global__ void calculateXMatrix(int *X, char *Q, char *T, int row_number, int c
     /* FOR LOOP */
     if(threadIndex < row_number) {
         for(int j = 0; j < col_number; j++) {
-            //if(baseFlattenIndex + j < col_number) {
-                if(j == 0) { X[baseFlattenIndex + j] = 0; }
-                else if(T[j - 1] == Q[i]) { X[baseFlattenIndex + j] = j; }
-                else { X[baseFlattenIndex + j] = X[baseFlattenIndex + j - 1]; }
-            //}
+            if(j == 0) { X[baseFlattenIndex + j] = 0; }
+            else if(T[j - 1] == Q[i]) { X[baseFlattenIndex + j] = j; }
+            else { X[baseFlattenIndex + j] = X[baseFlattenIndex + j - 1]; }
         }
     }
 }
@@ -291,22 +289,30 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
                 }
                 else if (X_l_j == 0) {
                     DVar = 1 + min_of_three(AVar, BVar, i + j - 1);
-                    if (DVar == AVar + 1) {
+                    if (DVar == 1 + (i + j - 1)) {
+                        Op[i * cols_D + j] = JUMP;
+                        // JumpLen[i * cols_D + j] = (j - 1); // how many columns we "skipped" in T
+                    }
+                    else if (DVar == AVar + 1) {
                         Op[i * cols_D + j] = REPLACE;
                     } else if (DVar == BVar + 1) {
-                        Op[i * cols_D + j] = INSERT;
-                    } else {
                         Op[i * cols_D + j] = DELETE;
+                    } else {
+                        Op[i * cols_D + j] = INSERT;
                     }  
                 }
                 else {
                     DVar = 1 + min_of_three(AVar, BVar, CVar + (j - 1 - X_l_j));
-                    if (DVar == AVar + 1) {
+                    if (DVar == 1 + (CVar + (j - 1 - X_l_j))) {
+                        Op[i * cols_D + j] = JUMP;
+                        // JumpLen[i * cols_D + j] = (j - 1 - X_l_j); // how many columns we jumped
+                    }
+                    else if (DVar == AVar + 1) {
                         Op[i * cols_D + j] = REPLACE;
                     } else if (DVar == BVar + 1) {
-                        Op[i * cols_D + j] = INSERT;
-                    } else {
                         Op[i * cols_D + j] = DELETE;
+                    } else {
+                        Op[i * cols_D + j] = INSERT;
                     }
                 }
 
@@ -543,6 +549,26 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     CHECK_CUDA_ERR(cudaMemcpy(d_D, D, size_D, cudaMemcpyHostToDevice));
 
+    /* === TERAZ MACIERZ Op === */
+    // HOST
+    int* Op = new int[(m + 1)*(n + 1)];
+    std::memset(Op, 0, (m + 1)*(n + 1)*sizeof(int));
+
+
+    // DEVICE POINTER
+    int* d_Op;
+
+    cudaMemGetInfo(&free_mem, &total_mem);
+
+    // ALOKUJEMY
+    size_t size_Op = (m + 1) * (n + 1) * sizeof(int);
+    cudaError_t err3 = cudaMalloc((void**)&d_Op, size_Op);
+    if (err1 != cudaSuccess) {
+        std::cerr << "Failed to allocate memory: " << cudaGetErrorString(err3) << std::endl;
+        return 1;
+    }
+    // Copy the array from host to device
+    CHECK_CUDA_ERR(cudaMemcpy(d_Op, Op, size_Op, cudaMemcpyHostToDevice));
 
     /* ====================== LAUNCHING COOPERATIVE KERNEL ======================== */
     // We'll assume we need (n + 1) total threads:
@@ -582,6 +608,20 @@ int main(int argc, char *argv[]) {
         &cols_D,
         &rows_X,
         &cols_X
+    };
+
+    // Kernel arguments
+    void* kernelArgsWithTransformations[] = {
+        &d_D,
+        &d_X,
+        &d_Q,
+        &d_T,
+        &d_P,
+        &rows_D,
+        &cols_D,
+        &rows_X,
+        &cols_X,
+        &d_Op
     };
 
     printf("================= OUTPUT FROM CPU ===================\n");
@@ -693,6 +733,65 @@ int main(int argc, char *argv[]) {
         for (int j = 0; j < n + 1; j++) {
             D[i * (n + 1) + j] = 0;
         }
+    }
+
+    printf("================= OUTPUT FROM KERNEL WITH TRANSFORMATIONS ===================\n");
+    
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
+
+    // Create CUDA events
+    cudaEvent_t startOps, stopOps;
+    cudaEventCreate(&startOps);
+    cudaEventCreate(&stopOps);
+
+    // Record the start event
+    cudaEventRecord(startOps);
+
+    cudaError_t err4 = cudaLaunchCooperativeKernel(
+        (void*)calculateDMatrixWithTransformations,
+        grid,
+        block,
+        kernelArgsWithTransformations,
+        sharedMemSize
+    );
+
+    // Synchronize to make sure the kernel finishes
+    cudaEventRecord(stopOps);
+    cudaEventSynchronize(stopOps);
+
+    CHECK_CUDA_ERR(cudaGetLastError());
+    CHECK_CUDA_ERR(cudaDeviceSynchronize());
+
+    float transformationsKernelTimeMs = 0.0f;
+    cudaEventElapsedTime(&transformationsKernelTimeMs, startOps, stopOps);
+
+    /* KOPIUJEMY PAMIEC */
+    CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
+
+    // Wyświetlanie wyników
+    std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
+    std::cout << "   (Time: " << transformationsKernelTimeMs << " ms)" << std::endl;
+
+    // Cleanup events
+    cudaEventDestroy(startOps);
+    cudaEventDestroy(stopOps);
+
+    /* WYZEROWANIE TABLICY D */
+    for (int i = 0; i < m + 1; i++) {
+        for (int j = 0; j < n + 1; j++) {
+            D[i * (n + 1) + j] = 0;
+        }
+    }
+
+    /* Wyswietlenie tablicy Op */
+    printf("TABLICA OPERACJI OP:\n");
+    for (int i = 0; i < m + 1; i++) {
+        for (int j = 0; j < n + 1; j++) {
+            printf(" %d |", Op[i * (n + 1) + j]);
+        }
+        printf("\n");
     }
 
     printf("================= OUTPUT FROM NAIVE KERNEL ===================\n");
