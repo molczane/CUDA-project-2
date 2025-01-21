@@ -11,6 +11,8 @@ namespace cg = cooperative_groups;
 // Maksymalne rozmiary danych
 const int MAX_ALPHABET_SIZE = 100;
 const int MAX_WORD_SIZE = 25200;
+const int THREADS_PER_BLOCK = 1024;
+const int INSERT = 1, DELETE = 2, REPLACE = 3, MATCH = 0;
 
 // --------------------------------------------------------------------------- // 
 //                     Error-checking macro for CUDA calls                     //
@@ -246,14 +248,98 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
 }
 /* ==================================================================================== */
 
+/* ======================= CALCULATE D MATRIX KERNEL WITH TRANSFORMATIONS ========================= */
+__global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X, int* Op) {
+    /* PREPARATION OF NEEDED DATA */
+    cg::grid_group grid = cg::this_grid();
+    const int threadIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    // kolumna ktora bedziemy przetwarzac
+    const int j = threadIndex;
+
+     /* Deklaracja AVar, BVar, CVar, DVar */
+    int AVar;
+    int BVar;
+    int CVar;
+    int DVar;
+
+    if (j < cols_D) {
+        for(int i = 0; i < rows_D; i++) {
+            // Calculate l directly using ASCII values
+            int P_prev = P[i - 1];
+            int l = (i > 0 && P_prev >= 'A' && P_prev <= 'Z') ? (P_prev - 'A') : -1;
+
+            // THIS CALCULATES LEVENSHTEIN DISTANCE
+            if(i == 0) { 
+                D[i * cols_D + j] = j;
+                DVar = j;
+                Op[i * cols_D + j] = (j > 0) ? INSERT : MATCH; 
+            }
+            else {
+                if(j == 0 || j % warpSize != 0) {
+                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                }   
+                else if(j % warpSize == 0) {
+                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                    AVar = D[(i - 1) * cols_D + (j - 1)];
+                }
+                // else {
+                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                // }
+
+                BVar = DVar;
+                int X_l_j = X[l * cols_X + j];
+                CVar = D[(i - 1) * cols_D + X_l_j - 1];
+                
+                if(j == 0) {
+                    DVar = i;
+                    Op[i * cols_D + j] = DELETE; // First column: Deletes
+                } 
+                else if (T[j - 1] == P_prev) {
+                    DVar = AVar;
+                    Op[i * cols_D + j] = MATCH; // No operation needed
+                }
+                else if (X_l_j == 0) {
+                    DVar = 1 + min_of_three(AVar, BVar, i + j - 1);
+                    if (DVar == AVar + 1) {
+                        Op[i * cols_D + j] = REPLACE;
+                    } else if (DVar == BVar + 1) {
+                        Op[i * cols_D + j] = INSERT;
+                    } else {
+                        Op[i * cols_D + j] = DELETE;
+                    }  
+                }
+                else {
+                    DVar = 1 + min_of_three(AVar, BVar, CVar + (j - 1 - X_l_j));
+                    if (DVar == AVar + 1) {
+                        Op[i * cols_D + j] = REPLACE;
+                    } else if (DVar == BVar + 1) {
+                        Op[i * cols_D + j] = INSERT;
+                    } else {
+                        Op[i * cols_D + j] = DELETE;
+                    }
+                }
+
+                D[i * cols_D + j] = DVar;
+            } 
+            
+            // synchronizujemy wszystkie watki w obrebie gridu
+            grid.sync();
+        }
+    }
+}
+/* ==================================================================================== */
+
 /* ======================= CALCULATE D MATRIX WITH SHARED MEMORY ========================= */
 __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
     // For dynamic shared memory, we must specify 'extern __shared__':
+    __shared__ char sT[THREADS_PER_BLOCK];
+    
+    int threadIdInBlock = threadIdx.x;
+
     extern __shared__ char s[];
 
     // // We'll store T in sT and P in sP, laid out back-to-back
-    char* sT = &s[0];      // covers indices [0..n-1]
-    char* sP = &s[cols_D - 1];      // covers indices [n..n+m-1]
+    char* sP = &s[0];      // covers indices [0..n-1]
 
     // 1) Copy T and P from global memory into shared memory
     //    We'll do it in a loop so multiple threads help copy.
@@ -261,7 +347,7 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
 
     // Copy T into sT
     if(tid < cols_D - 1) {
-        sT[tid] = T[tid]; 
+        sT[threadIdInBlock] = T[tid]; 
     }
 
     if(tid < rows_D - 1) {
@@ -285,11 +371,12 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
     if (j < cols_D) {
         for(int i = 0; i < rows_D; i++) {
             // Calculate l directly using ASCII values
-            int P_prev = P[i - 1];
-            int l = (i > 0 && P_prev >= 'A' && P_prev <= 'Z') ? (P_prev - 'A') : -1;
-            // int l = (i > 0 && sP[i - 1] >= 'A' && sP[i - 1] <= 'Z') 
-            //             ? (sP[i - 1] - 'A') 
-            //             : -1;
+            int l = -1;
+            int P_prev;
+            if(i > 0) {
+                P_prev = sP[i - 1];
+                l = (i > 0 && P_prev >= 'A' && P_prev <= 'Z') ? (P_prev - 'A') : -1;
+            }
 
             // THIS CALCULATES LEVENSHTEIN DISTANCE
             if(i == 0) { 
@@ -315,12 +402,9 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
                 if(j == 0) {
                     DVar = i;
                 } 
-                else if (T[j - 1] == P_prev) {
+                else if (sT[threadIdInBlock - 1] == P_prev) {
                     DVar = AVar;
                 }
-                // else if (sT[j - 1] == sP[i - 1]) {
-                //     DVar = AVar;
-                // }
                 else if (X_l_j == 0) {
                     DVar = 1 + min_of_three(AVar, BVar, i + j - 1);
                 }
@@ -509,16 +593,16 @@ int main(int argc, char *argv[]) {
 
     printf("================= OUTPUT FROM CPU ===================\n");
 
-    auto cpuStart = std::chrono::high_resolution_clock::now();
+    // auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
+    // int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
 
-    auto cpuEnd = std::chrono::high_resolution_clock::now();
+    // auto cpuEnd = std::chrono::high_resolution_clock::now();
 
-    auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
+    // auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
 
-    std::cout << "CPU Levenshtein distance = " << distance << "  (";
-    std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
+    // std::cout << "CPU Levenshtein distance = " << distance << "  (";
+    // std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
 
     printf("================= OUTPUT FROM ADVANCED KERNEL ===================\n");
     
@@ -561,6 +645,55 @@ int main(int argc, char *argv[]) {
     // Cleanup events
     cudaEventDestroy(startAdv);
     cudaEventDestroy(stopAdv);
+
+    /* WYZEROWANIE TABLICY D */
+    for (int i = 0; i < m + 1; i++) {
+        for (int j = 0; j < n + 1; j++) {
+            D[i * (n + 1) + j] = 0;
+        }
+    }
+
+    printf("================= OUTPUT FROM KERNEL WITH SHARED MEMORY ===================\n");
+    
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
+
+    // Create CUDA events
+    cudaEvent_t startSh, stopSh;
+    cudaEventCreate(&startSh);
+    cudaEventCreate(&stopSh);
+
+    // Record the start event
+    cudaEventRecord(startSh);
+
+    cudaError_t err2 = cudaLaunchCooperativeKernel(
+        (void*)calculateDMatrixAdvanced,
+        grid,
+        block,
+        kernelArgs,
+        sharedMemSize
+    );
+
+    // Synchronize to make sure the kernel finishes
+    cudaEventRecord(stopSh);
+    cudaEventSynchronize(stopSh);
+
+    CHECK_CUDA_ERR(cudaGetLastError());
+    CHECK_CUDA_ERR(cudaDeviceSynchronize());
+
+    float sharedKernelTimeMs = 0.0f;
+    cudaEventElapsedTime(&sharedKernelTimeMs, startSh, stopSh);
+
+    /* KOPIUJEMY PAMIEC */
+    CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
+
+    // Wyświetlanie wyników
+    std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
+    std::cout << "   (Time: " << sharedKernelTimeMs << " ms)" << std::endl;
+
+    // Cleanup events
+    cudaEventDestroy(startSh);
+    cudaEventDestroy(stopSh);
 
     /* WYZEROWANIE TABLICY D */
     for (int i = 0; i < m + 1; i++) {
