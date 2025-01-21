@@ -40,11 +40,11 @@ __global__ void calculateXMatrix(int *X, char *Q, char *T, int row_number, int c
     /* FOR LOOP */
     if(threadIndex < row_number) {
         for(int j = 0; j < col_number; j++) {
-            if(baseFlattenIndex + j < col_number) {
+            //if(baseFlattenIndex + j < col_number) {
                 if(j == 0) { X[baseFlattenIndex + j] = 0; }
                 else if(T[j - 1] == Q[i]) { X[baseFlattenIndex + j] = j; }
                 else { X[baseFlattenIndex + j] = X[baseFlattenIndex + j - 1]; }
-            }
+            //}
         }
     }
 }
@@ -257,10 +257,7 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
     const int j = threadIndex;
 
      /* Deklaracja AVar, BVar, CVar, DVar */
-    int AVar;
-    int BVar;
-    int CVar;
-    int DVar;
+    int AVar, BVar, CVar, DVar;
 
     if (j < cols_D) {
         for(int i = 0; i < rows_D; i++) {
@@ -275,16 +272,10 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
                 Op[i * cols_D + j] = (j > 0) ? INSERT : MATCH; 
             }
             else {
-                if(j == 0 || j % warpSize != 0) {
-                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                }   
-                else if(j % warpSize == 0) {
-                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                if(j % warpSize == 0) {
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
-                // else {
-                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // }
 
                 BVar = DVar;
                 int X_l_j = X[l * cols_X + j];
@@ -384,11 +375,13 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
                 DVar = j; 
             }
             else {
-                if(j == 0 || j % warpSize != 0) {
-                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                }   
-                else if(j % warpSize == 0) {
-                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                // if(j == 0 || j % warpSize != 0) {
+                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                // }   
+                // else
+                if(j % warpSize == 0) {
+                    //AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
                 // else {
