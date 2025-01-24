@@ -5,18 +5,25 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono> 
+#include <vector>
 
 namespace cg = cooperative_groups;
+
+/* STALE DO ODZYSKANIA SCIEZKI */
+#define MATCH   0
+#define REPLACE 1
+#define INSERT  2
+#define DELETE  3
+#define JUMP    4 // Multi-character jump from X[l, j]
 
 // Maksymalne rozmiary danych
 const int MAX_ALPHABET_SIZE = 100;
 const int MAX_WORD_SIZE = 25200;
 const int THREADS_PER_BLOCK = 1024;
-const int INSERT = 1, DELETE = 2, REPLACE = 3, MATCH = 0, JUMP = 4;
 
-// --------------------------------------------------------------------------- // 
+// =========================================================================== // 
 //                     Error-checking macro for CUDA calls                     //
-// --------------------------------------------------------------------------- //
+// =========================================================================== //
 #define CHECK_CUDA_ERR(x)                                      \
     do {                                                       \
         cudaError_t err = x;                                   \
@@ -145,7 +152,7 @@ int levenshteinNaiveCPU(
 }
 /* =================================================================================== */
 
-/* ============================ CALCULATE D MATRIX KERNEL ============================= */
+/* ================================================= CALCULATE D MATRIX KERNEL =================================================== */
 __global__ void calculateDMatrixNaive(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
     /* PREPARATION OF NEEDED DATA */
     cg::grid_group grid = cg::this_grid();
@@ -181,7 +188,7 @@ __global__ void calculateDMatrixNaive(int* D, int *X, char *Q, char *T, char *P,
         }
     }
 }
-/* ==================================================================================== */
+/* =========================================================================================================================== */
 
 /* ======================= CALCULATE D MATRIX KERNEL ADVANCED ========================= */
 __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
@@ -215,9 +222,6 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
-                // else {
-                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // }
 
                 BVar = DVar;
                 int X_l_j = X[l * cols_X + j];
@@ -246,8 +250,8 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
 }
 /* ==================================================================================== */
 
-/* ======================= CALCULATE D MATRIX KERNEL WITH TRANSFORMATIONS ========================= */
-__global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X, int* Op) {
+/* ======================= CALCULATE D MATRIX KERNEL ADVANCED AND STORE TRANSFORMATIONS ========================= */
+__global__ void calculateDMatrixAdvancedTransformations(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X, int* Op) {
     /* PREPARATION OF NEEDED DATA */
     cg::grid_group grid = cg::this_grid();
     const int threadIndex = blockIdx.x * blockDim.x + threadIdx.x;
@@ -255,8 +259,10 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
     const int j = threadIndex;
 
      /* Deklaracja AVar, BVar, CVar, DVar */
-    int AVar, BVar, CVar, DVar;
-
+    int AVar;
+    int BVar;
+    int CVar;
+    int DVar;
     if (j < cols_D) {
         for(int i = 0; i < rows_D; i++) {
             // Calculate l directly using ASCII values
@@ -266,12 +272,19 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
             // THIS CALCULATES LEVENSHTEIN DISTANCE
             if(i == 0) { 
                 D[i * cols_D + j] = j;
-                DVar = j;
-                Op[i * cols_D + j] = (j > 0) ? INSERT : MATCH; 
+                DVar = j; 
+
+                if(j == 0)
+                    Op[i * cols_D + j] = MATCH;
+                else
+                    Op[i * cols_D + j] = INSERT;
             }
             else {
-                AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                if(j % warpSize == 0) {
+                if(j == 0 || j % warpSize != 0) {
+                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                }   
+                else if(j % warpSize == 0) {
+                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
 
@@ -281,35 +294,31 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
                 
                 if(j == 0) {
                     DVar = i;
-                    Op[i * cols_D + j] = DELETE; // First column: Deletes
+
+                    Op[i * cols_D + j] = DELETE;
                 } 
                 else if (T[j - 1] == P_prev) {
                     DVar = AVar;
-                    Op[i * cols_D + j] = MATCH; // No operation needed
+
+                    Op[i * cols_D + j] = MATCH;
                 }
                 else if (X_l_j == 0) {
                     DVar = 1 + min_of_three(AVar, BVar, i + j - 1);
-                    if (DVar == 1 + (i + j - 1)) {
-                        Op[i * cols_D + j] = JUMP;
-                        // JumpLen[i * cols_D + j] = (j - 1); // how many columns we "skipped" in T
-                    }
-                    else if (DVar == AVar + 1) {
-                        Op[i * cols_D + j] = REPLACE;
-                    } else if (DVar == BVar + 1) {
+
+                    if(DVar == 1 + AVar) {
+                    Op[i * cols_D + j] = REPLACE;
+                    } else if(DVar == 1 + BVar) {
                         Op[i * cols_D + j] = DELETE;
                     } else {
                         Op[i * cols_D + j] = INSERT;
-                    }  
+                    }
                 }
                 else {
                     DVar = 1 + min_of_three(AVar, BVar, CVar + (j - 1 - X_l_j));
-                    if (DVar == 1 + (CVar + (j - 1 - X_l_j))) {
-                        Op[i * cols_D + j] = JUMP;
-                        // JumpLen[i * cols_D + j] = (j - 1 - X_l_j); // how many columns we jumped
-                    }
-                    else if (DVar == AVar + 1) {
-                        Op[i * cols_D + j] = REPLACE;
-                    } else if (DVar == BVar + 1) {
+
+                    if(DVar == 1 + AVar) {
+                    Op[i * cols_D + j] = REPLACE;
+                    } else if(DVar == 1 + BVar) {
                         Op[i * cols_D + j] = DELETE;
                     } else {
                         Op[i * cols_D + j] = INSERT;
@@ -326,7 +335,7 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
 }
 /* ==================================================================================== */
 
-/* ======================= CALCULATE D MATRIX WITH SHARED MEMORY ========================= */
+/* ======================= CALCULATE D MATRIX WITH USAGE OF SHARED MEMORY ========================= */
 __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
     // For dynamic shared memory, we must specify 'extern __shared__':
     __shared__ char sT[THREADS_PER_BLOCK];
@@ -335,11 +344,8 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
 
     extern __shared__ char s[];
 
-    // // We'll store T in sT and P in sP, laid out back-to-back
-    char* sP = &s[0];      // covers indices [0..n-1]
+    char* sP = &s[0]; 
 
-    // 1) Copy T and P from global memory into shared memory
-    //    We'll do it in a loop so multiple threads help copy.
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     // Copy T into sT
@@ -382,17 +388,9 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
             }
             else {
                 AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // if(j == 0 || j % warpSize != 0) {
-                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // }   
-                // else
                 if(j % warpSize == 0) {
-                    //AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
-                // else {
-                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // }
 
                 BVar = DVar;
                 int X_l_j = X[l * cols_X + j];
@@ -420,6 +418,112 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
     }
 }
 /* ==================================================================================== */
+
+/* ========================== FUNCTION TO RETRIEVE LIST OF EDITS FROM DATA THAT WE HAVE ============================ */
+std::vector<std::string>
+reconstructEditsSingleStep(
+    const int* D, const int* Op,
+    const char* h_T, const char* h_P,
+    int m, int n
+)
+{
+    std::vector<std::string> ops;
+    int cols = (n+1);
+
+    int i = m; 
+    int j = n;
+
+    while (i>0 || j>0) {
+        int op = Op[i*cols + j];
+        switch (op) {
+            case MATCH: {
+                // T[j-1] == P[i-1]
+                // no cost, move diag
+                char c = h_T[j-1]; 
+                ops.push_back(std::string("MATCH(") + c + ")");
+                i--; 
+                j--;
+            } break;
+            case REPLACE: {
+                // T[j-1] replaced with P[i-1]
+                char fromC = h_T[j-1];
+                char toC   = h_P[i-1];
+                ops.push_back("REPLACE(" + std::string(1,fromC)
+                             + "->" + std::string(1,toC) + ")");
+                i--;
+                j--;
+            } break;
+            case INSERT: {
+                // We interpret "INSERT" as "we took from left"
+                // => we inserted h_T[j-1]"
+                char c = h_T[j-1];
+                ops.push_back("INSERT(" + std::string(1,c) + ")");
+                j--;
+            } break;
+            case DELETE: {
+                // We interpret "DELETE" as "we took from up"
+                // => we removed P[i-1]"
+                char c = h_P[i-1];
+                ops.push_back("DELETE(" + std::string(1,c) + ")");
+                i--;
+            } break;
+            default: {
+                // boundary fallback or error
+                // if i=0 => insert the leftover j, if j=0 => delete leftover i
+                if (j>0 && i==0) {
+                    // means all leftover are inserts
+                    char c = h_T[j-1];
+                    ops.push_back("INSERT(" + std::string(1,c) + ")");
+                    j--;
+                }
+                else if (i>0 && j==0) {
+                    // leftover are deletes
+                    char c = h_P[i-1];
+                    ops.push_back("DELETE(" + std::string(1,c) + ")");
+                    i--;
+                }
+                else {
+                    // unexpected
+                    printf("Unknown op code at i=%d j=%d\n", i,j);
+                    i=0; j=0;
+                }
+            } break;
+        }
+    }
+
+    // Reverse to get forward order
+    std::reverse(ops.begin(), ops.end());
+    return ops;
+}
+/* ============================================================================================================= */
+
+/* ===================== FUNCTION TO PRINT LIST OF TRANSFORMATIONS ===================== */
+void printTransformations(const std::vector<std::string>& ops) {
+    printf("List of transformations:\n");
+    for (size_t i = 0; i < ops.size(); i++) {
+        // Print an index or step number
+        printf("%zu. %s\n", i+1, ops[i].c_str());
+    }
+}
+
+void printTransformationsToFile(const std::vector<std::string>& ops)
+{
+    // Open file for writing (overwrites existing content)
+    std::ofstream outFile("transformations.out");
+    if (!outFile.is_open()) {
+        // If for some reason the file couldn't be opened, you can fallback or show error
+        std::fprintf(stderr, "Error: Could not open transformations.out for writing.\n");
+        return;
+    }
+
+    outFile << "List of transformations:\n";
+    for (size_t i = 0; i < ops.size(); i++) {
+        outFile << (i + 1) << ". " << ops[i] << "\n";
+    }
+
+    outFile.close();
+}
+/* ===================================================================================== */
 
 /* ====================================== MAIN ======================================== */
 int main(int argc, char *argv[]) {
@@ -492,6 +596,11 @@ int main(int argc, char *argv[]) {
     char* d_T;
     char* d_P;
 
+    // Create CUDA events
+    // cudaEvent_t startMemoryAllocationX, stopMemoryAllocationX;
+    // cudaEventCreate(&startMemoryAllocationX);
+    // cudaEventCreate(&stopMemoryAllocationX);
+
     /* TABLICA X */
     // Allocate memory on the device
     size_t size_X = a_len * (n + 1) * sizeof(int);
@@ -517,18 +626,44 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     cudaMemcpy(d_P, P, size_P, cudaMemcpyHostToDevice);
 
-    //printf("[MEMCHECK] WORKS\n");
+    // Synchronize to make sure the kernel finishes
+    // cudaEventRecord(stopMemoryAllocationX);
+    // cudaEventSynchronize(stopMemoryAllocationX);
+
+    // float allocationXTime = 0.0f;
+    // cudaEventElapsedTime(&allocationXTime, startMemoryAllocationX, stopMemoryAllocationX);
+
+     // Wyświetlanie wyników
+    // std::cout << "Alokacja oraz kopiowanie danych wejściowych na gpu (Tablica X, Alfabet Q, Słowo T, Słowo P): (Time: " << allocationXTime << " ms)" << std::endl;
+
+    // Create CUDA events
+    cudaEvent_t startX, stopX;
+    cudaEventCreate(&startX);
+    cudaEventCreate(&stopX);
+
+    // Record the start event
+    cudaEventRecord(startX);
 
     /* WYWOLUJEMY KERNEL DO OBLICZENIA MACIERZY X */
     calculateXMatrix<<<1, a_len>>>(d_X, d_Q, d_T, a_len, n + 1);
-
+    
     /* SYNCHRONIZACJA */
     cudaDeviceSynchronize();
+
+    // Synchronize to make sure the kernel finishes
+    cudaEventRecord(stopX);
 
     /* KOPIUJEMY PAMIEC */
     cudaMemcpy(X, d_X, size_X, cudaMemcpyDeviceToHost);
 
-    /* === TERAZ MACIERZ D === */
+    float kernelXtime = 0.0f;
+    cudaEventElapsedTime(&kernelXtime, startX, stopX);
+
+    // Wyświetlanie wyników
+    std::cout << "Kernel obliczający macierz X: (Time: " << kernelXtime << " ms)" << std::endl;
+
+
+    /* ===================== TERAZ MACIERZ D ======================== */
     // HOST
     int* D = new int[(m + 1)*(n + 1)];
     std::memset(D, 0, (m + 1)*(n + 1)*sizeof(int));
@@ -549,7 +684,7 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     CHECK_CUDA_ERR(cudaMemcpy(d_D, D, size_D, cudaMemcpyHostToDevice));
 
-    /* === TERAZ MACIERZ Op === */
+    /* ============================= TERAZ MACIERZ Op ============================== */
     // HOST
     int* Op = new int[(m + 1)*(n + 1)];
     std::memset(Op, 0, (m + 1)*(n + 1)*sizeof(int));
@@ -570,29 +705,7 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     CHECK_CUDA_ERR(cudaMemcpy(d_Op, Op, size_Op, cudaMemcpyHostToDevice));
 
-    /* === TERAZ MACIERZ JumpLen === */
-    // HOST
-    int* JumpLen = new int[(m + 1)*(n + 1)];
-    std::memset(JumpLen, 0, (m + 1)*(n + 1)*sizeof(int));
-
-
-    // DEVICE POINTER
-    int* d_JumpLen;
-
-    cudaMemGetInfo(&free_mem, &total_mem);
-
-    // ALOKUJEMY
-    size_t size_JumpLen = (m + 1) * (n + 1) * sizeof(int);
-    cudaError_t err4 = cudaMalloc((void**)&d_JumpLen, size_JumpLen);
-    if (err4 != cudaSuccess) {
-        std::cerr << "Failed to allocate memory: " << cudaGetErrorString(err4) << std::endl;
-        return 1;
-    }
-
-    // Copy the array from host to device
-    CHECK_CUDA_ERR(cudaMemcpy(d_JumpLen, JumpLen, size_JumpLen, cudaMemcpyHostToDevice));
-
-    /* ====================== LAUNCHING COOPERATIVE KERNEL ======================== */
+    /* ======================================= LAUNCHING COOPERATIVE KERNELS ======================================= */
     // We'll assume we need (n + 1) total threads:
     int totalThreads = n + 1;
 
@@ -643,23 +756,23 @@ int main(int argc, char *argv[]) {
         &cols_D,
         &rows_X,
         &cols_X,
-        &d_Op
+        &d_Op,
     };
 
-    printf("================= OUTPUT FROM CPU ===================\n");
+    printf("======================= OUTPUT FROM CPU ==========================\n");
 
-    // auto cpuStart = std::chrono::high_resolution_clock::now();
+    auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    // int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
+    int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
 
-    // auto cpuEnd = std::chrono::high_resolution_clock::now();
+    auto cpuEnd = std::chrono::high_resolution_clock::now();
 
-    // auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
+    auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
 
-    // std::cout << "CPU Levenshtein distance = " << distance << "  (";
-    // std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
+    std::cout << "CPU Levenshtein distance = " << distance << "  (";
+    std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
 
-    printf("================= OUTPUT FROM ADVANCED KERNEL ===================\n");
+    printf("=================== OUTPUT FROM ADVANCED KERNEL =====================\n");
     
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
@@ -759,62 +872,57 @@ int main(int argc, char *argv[]) {
 
     printf("================= OUTPUT FROM KERNEL WITH TRANSFORMATIONS ===================\n");
     
-//    cudaMemGetInfo(&free_mem, &total_mem);
-//    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
-//
-//    // Create CUDA events
-//    cudaEvent_t startOps, stopOps;
-//    cudaEventCreate(&startOps);
-//    cudaEventCreate(&stopOps);
-//
-//    // Record the start event
-//    cudaEventRecord(startOps);
-//
-//    cudaError_t err4 = cudaLaunchCooperativeKernel(
-//        (void*)calculateDMatrixWithTransformations,
-//        grid,
-//        block,
-//        kernelArgsWithTransformations,
-//        sharedMemSize
-//    );
-//
-//    // Synchronize to make sure the kernel finishes
-//    cudaEventRecord(stopOps);
-//    cudaEventSynchronize(stopOps);
-//
-//    CHECK_CUDA_ERR(cudaGetLastError());
-//    CHECK_CUDA_ERR(cudaDeviceSynchronize());
-//
-//    float transformationsKernelTimeMs = 0.0f;
-//    cudaEventElapsedTime(&transformationsKernelTimeMs, startOps, stopOps);
-//
-//    /* KOPIUJEMY PAMIEC */
-//    CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
-//    CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
-//
-//    // Wyświetlanie wyników
-//    std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
-//    std::cout << "   (Time: " << transformationsKernelTimeMs << " ms)" << std::endl;
-//
-//    // Cleanup events
-//    cudaEventDestroy(startOps);
-//    cudaEventDestroy(stopOps);
-//
-//    /* WYZEROWANIE TABLICY D */
-//    for (int i = 0; i < m + 1; i++) {
-//        for (int j = 0; j < n + 1; j++) {
-//            D[i * (n + 1) + j] = 0;
-//        }
-//    }
-//
-//    /* Wyswietlenie tablicy Op */
-//    printf("TABLICA OPERACJI OP:\n");
-//    for (int i = 0; i < m + 1; i++) {
-//        for (int j = 0; j < n + 1; j++) {
-//            printf(" %d |", Op[i * (n + 1) + j]);
-//        }
-//        printf("\n");
-//    }
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
+
+    // Create CUDA events
+    cudaEvent_t startOps, stopOps;
+    cudaEventCreate(&startOps);
+    cudaEventCreate(&stopOps);
+
+    // Record the start event
+    cudaEventRecord(startOps);
+
+    cudaError_t err5 = cudaLaunchCooperativeKernel(
+        (void*)calculateDMatrixAdvancedTransformations,
+        grid,
+        block,
+        kernelArgsWithTransformations,
+        sharedMemSize
+    );
+
+    // Synchronize to make sure the kernel finishes
+    cudaEventRecord(stopOps);
+    cudaEventSynchronize(stopOps);
+
+    CHECK_CUDA_ERR(cudaGetLastError());
+    CHECK_CUDA_ERR(cudaDeviceSynchronize());
+
+    float transformationsKernelTimeMs = 0.0f;
+    cudaEventElapsedTime(&transformationsKernelTimeMs, startOps, stopOps);
+
+    /* KOPIUJEMY PAMIEC */
+    CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
+
+    // Wyświetlanie wyników
+    std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
+    std::cout << "   (Time: " << transformationsKernelTimeMs << " ms)" << std::endl;
+
+    // Cleanup events
+    cudaEventDestroy(startOps);
+    cudaEventDestroy(stopOps);
+
+    /* WYZEROWANIE TABLICY D */
+    for (int i = 0; i < m + 1; i++) {
+        for (int j = 0; j < n + 1; j++) {
+            D[i * (n + 1) + j] = 0;
+        }
+    }
+    
+    auto ops = reconstructEditsSingleStep(D, Op, /* JumpLen not used*/ T, P, m, n);
+
+    printTransformationsToFile(ops);
 
     printf("================= OUTPUT FROM NAIVE KERNEL ===================\n");
 
@@ -852,9 +960,6 @@ int main(int argc, char *argv[]) {
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
 
     // Wyświetlanie wyników
-    // std::cout << "\nAlfabet: " << A_read << " (dlugość: " << a_len << ")" << std::endl;
-    // std::cout << "Słowo 1: " << T_read << " (dlugość: " << n << ")" << std::endl;
-    // std::cout << "Słowo 2: " << P_read << " (dlugość: " << m << ")" << std::endl;
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
     std::cout << "   (Time: " << naiveKernelTimeMs << " ms)" << std::endl;
 
@@ -867,6 +972,7 @@ int main(int argc, char *argv[]) {
     cudaFree(d_T);
     cudaFree(d_P);
     cudaFree(d_D);
+    cudaFree(d_Op);
 
     // === Zwolnienie pamięci na host (heap)
     delete[] X;
@@ -874,6 +980,7 @@ int main(int argc, char *argv[]) {
     delete[] T;
     delete[] P;
     delete[] D;
+    delete[] Op;
 
     return 0;
 }
