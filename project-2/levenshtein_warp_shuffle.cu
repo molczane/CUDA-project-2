@@ -674,6 +674,8 @@ int main(int argc, char *argv[]) {
 
     cudaMemGetInfo(&free_mem, &total_mem);
 
+    auto cpuStartAllocation = std::chrono::high_resolution_clock::now();
+
     // ALOKUJEMY
     size_t size_D = (m + 1) * (n + 1) * sizeof(int);
     cudaError_t err1 = cudaMalloc((void**)&d_D, size_D);
@@ -704,6 +706,12 @@ int main(int argc, char *argv[]) {
     }
     // Copy the array from host to device
     CHECK_CUDA_ERR(cudaMemcpy(d_Op, Op, size_Op, cudaMemcpyHostToDevice));
+
+    auto cpuEndAllocation = std::chrono::high_resolution_clock::now();
+
+    auto cpuDurationMsAllocation = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEndAllocation - cpuStartAllocation).count();
+
+    std::cout << "Time of allocation of D and Op tables: " << cpuDurationMsAllocation << " ms)" << std::endl;
 
     /* ======================================= LAUNCHING COOPERATIVE KERNELS ======================================= */
     // We'll assume we need (n + 1) total threads:
@@ -759,7 +767,7 @@ int main(int argc, char *argv[]) {
         &d_Op,
     };
 
-    printf("======================= OUTPUT FROM CPU ==========================\n");
+    printf("\n======================= OUTPUT FROM CPU ==========================\n");
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
@@ -770,9 +778,9 @@ int main(int argc, char *argv[]) {
     auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
 
     std::cout << "CPU Levenshtein distance = " << distance << "  (";
-    std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
+    std::cout << "Kernel Time: " << cpuDurationMs << " ms)" << std::endl;
 
-    printf("=================== OUTPUT FROM ADVANCED KERNEL =====================\n");
+    printf("\n=================== OUTPUT FROM ADVANCED KERNEL =====================\n");
     
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
@@ -803,12 +811,20 @@ int main(int argc, char *argv[]) {
     float advancedKernelTimeMs = 0.0f;
     cudaEventElapsedTime(&advancedKernelTimeMs, startAdv, stopAdv);
 
+    auto cpuStartAfterKernel1 = std::chrono::high_resolution_clock::now();
+
     /* KOPIUJEMY PAMIEC */
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
 
+    auto cpuEndAfterKernel1 = std::chrono::high_resolution_clock::now();
+
+    auto cpuDurationMsAfterKernel1 = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEndAfterKernel1 - cpuStartAfterKernel1).count();
+
+    std::cout << "Copying memory GPU -> CPU: " << cpuDurationMsAfterKernel1 << " ms)" << std::endl;
+
     // Wyświetlanie wyników
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
-    std::cout << "   (Time: " << advancedKernelTimeMs << " ms)" << std::endl;
+    std::cout << "   (Kernel Time: " << advancedKernelTimeMs << " ms)" << std::endl;
 
     // Cleanup events
     cudaEventDestroy(startAdv);
@@ -821,7 +837,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    printf("================= OUTPUT FROM KERNEL WITH SHARED MEMORY ===================\n");
+    printf("\n================= OUTPUT FROM KERNEL WITH SHARED MEMORY ===================\n");
     
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
@@ -852,12 +868,21 @@ int main(int argc, char *argv[]) {
     float sharedKernelTimeMs = 0.0f;
     cudaEventElapsedTime(&sharedKernelTimeMs, startSh, stopSh);
 
+    auto cpuStartAfterKernel2 = std::chrono::high_resolution_clock::now();
+
     /* KOPIUJEMY PAMIEC */
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
 
+    auto cpuEndAfterKernel2 = std::chrono::high_resolution_clock::now();
+
+    auto cpuDurationMsAfterKernel2 = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEndAfterKernel2 - cpuStartAfterKernel2).count();
+
+    std::cout << "Copying memory GPU -> CPU: " << cpuDurationMsAfterKernel2 << " ms)" << std::endl;
+
+
     // Wyświetlanie wyników
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
-    std::cout << "   (Time: " << sharedKernelTimeMs << " ms)" << std::endl;
+    std::cout << "   (Kernel Time: " << sharedKernelTimeMs << " ms)" << std::endl;
 
     // Cleanup events
     cudaEventDestroy(startSh);
@@ -870,7 +895,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    printf("================= OUTPUT FROM KERNEL WITH TRANSFORMATIONS ===================\n");
+    printf("\n================= OUTPUT FROM KERNEL WITH TRANSFORMATIONS ===================\n");
     
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
@@ -901,13 +926,21 @@ int main(int argc, char *argv[]) {
     float transformationsKernelTimeMs = 0.0f;
     cudaEventElapsedTime(&transformationsKernelTimeMs, startOps, stopOps);
 
-    /* KOPIUJEMY PAMIEC */
+    auto cpuStartAfterKernel3 = std::chrono::high_resolution_clock::now();
+
+     /* KOPIUJEMY PAMIEC */
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
     CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
 
+    auto cpuEndAfterKernel3 = std::chrono::high_resolution_clock::now();
+
+    auto cpuDurationMsAfterKernel3 = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEndAfterKernel3 - cpuStartAfterKernel3).count();
+
+    std::cout << "Copying memory GPU -> CPU: " << cpuDurationMsAfterKernel3 << " ms)" << std::endl;
+
     // Wyświetlanie wyników
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
-    std::cout << "   (Time: " << transformationsKernelTimeMs << " ms)" << std::endl;
+    std::cout << "   (Kernel Time: " << transformationsKernelTimeMs << " ms)" << std::endl;
 
     // Cleanup events
     cudaEventDestroy(startOps);
@@ -924,7 +957,7 @@ int main(int argc, char *argv[]) {
 
     printTransformationsToFile(ops);
 
-    printf("================= OUTPUT FROM NAIVE KERNEL ===================\n");
+    printf("\n================= OUTPUT FROM NAIVE KERNEL ===================\n");
 
     cudaEvent_t startNaive, stopNaive;
     cudaEventCreate(&startNaive);
@@ -956,12 +989,20 @@ int main(int argc, char *argv[]) {
     float naiveKernelTimeMs = 0.0f;
     cudaEventElapsedTime(&naiveKernelTimeMs, startNaive, stopNaive);
 
+    auto cpuStartAfterKernel4 = std::chrono::high_resolution_clock::now();
+
     /* KOPIUJEMY PAMIEC */
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
 
+    auto cpuEndAfterKernel4 = std::chrono::high_resolution_clock::now();
+
+    auto cpuDurationMsAfterKernel4 = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEndAfterKernel4 - cpuStartAfterKernel4).count();
+
+    std::cout << "Copying memory GPU -> CPU: " << cpuDurationMsAfterKernel4 << " ms)" << std::endl;
+
     // Wyświetlanie wyników
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
-    std::cout << "   (Time: " << naiveKernelTimeMs << " ms)" << std::endl;
+    std::cout << "   (Kernel Time: " << naiveKernelTimeMs << " ms)" << std::endl;
 
     cudaEventDestroy(startNaive);
     cudaEventDestroy(stopNaive);
