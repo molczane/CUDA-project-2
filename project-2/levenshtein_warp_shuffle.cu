@@ -222,9 +222,6 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
                     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
-                // else {
-                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // }
 
                 BVar = DVar;
                 int X_l_j = X[l * cols_X + j];
@@ -253,7 +250,7 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
 }
 /* ==================================================================================== */
 
-/* ======================= CALCULATE D MATRIX KERNEL ADVANCED ========================= */
+/* ======================= CALCULATE D MATRIX KERNEL ADVANCED AND STORE TRANSFORMATIONS ========================= */
 __global__ void calculateDMatrixAdvancedTransformations(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X, int* Op) {
     /* PREPARATION OF NEEDED DATA */
     cg::grid_group grid = cg::this_grid();
@@ -290,9 +287,6 @@ __global__ void calculateDMatrixAdvancedTransformations(int* D, int *X, char *Q,
                     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
-                // else {
-                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // }
 
                 BVar = DVar;
                 int X_l_j = X[l * cols_X + j];
@@ -341,7 +335,7 @@ __global__ void calculateDMatrixAdvancedTransformations(int* D, int *X, char *Q,
 }
 /* ==================================================================================== */
 
-/* ======================= CALCULATE D MATRIX WITH SHARED MEMORY ========================= */
+/* ======================= CALCULATE D MATRIX WITH USAGE OF SHARED MEMORY ========================= */
 __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X) {
     // For dynamic shared memory, we must specify 'extern __shared__':
     __shared__ char sT[THREADS_PER_BLOCK];
@@ -350,11 +344,8 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
 
     extern __shared__ char s[];
 
-    // // We'll store T in sT and P in sP, laid out back-to-back
-    char* sP = &s[0];      // covers indices [0..n-1]
+    char* sP = &s[0]; 
 
-    // 1) Copy T and P from global memory into shared memory
-    //    We'll do it in a loop so multiple threads help copy.
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     // Copy T into sT
@@ -397,17 +388,9 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
             }
             else {
                 AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // if(j == 0 || j % warpSize != 0) {
-                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // }   
-                // else
                 if(j % warpSize == 0) {
-                    //AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
-                // else {
-                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                // }
 
                 BVar = DVar;
                 int X_l_j = X[l * cols_X + j];
@@ -522,6 +505,24 @@ void printTransformations(const std::vector<std::string>& ops) {
         printf("%zu. %s\n", i+1, ops[i].c_str());
     }
 }
+
+void printTransformationsToFile(const std::vector<std::string>& ops)
+{
+    // Open file for writing (overwrites existing content)
+    std::ofstream outFile("transformations.out");
+    if (!outFile.is_open()) {
+        // If for some reason the file couldn't be opened, you can fallback or show error
+        std::fprintf(stderr, "Error: Could not open transformations.out for writing.\n");
+        return;
+    }
+
+    outFile << "List of transformations:\n";
+    for (size_t i = 0; i < ops.size(); i++) {
+        outFile << (i + 1) << ". " << ops[i] << "\n";
+    }
+
+    outFile.close();
+}
 /* ===================================================================================== */
 
 /* ====================================== MAIN ======================================== */
@@ -595,6 +596,11 @@ int main(int argc, char *argv[]) {
     char* d_T;
     char* d_P;
 
+    // Create CUDA events
+    // cudaEvent_t startMemoryAllocationX, stopMemoryAllocationX;
+    // cudaEventCreate(&startMemoryAllocationX);
+    // cudaEventCreate(&stopMemoryAllocationX);
+
     /* TABLICA X */
     // Allocate memory on the device
     size_t size_X = a_len * (n + 1) * sizeof(int);
@@ -608,8 +614,6 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     cudaMemcpy(d_Q, Q, size_Q, cudaMemcpyHostToDevice);
 
-
-
     /* SLOWO T */
     size_t size_T = n * sizeof(char);
     cudaMalloc((void**)&d_T, size_T);
@@ -622,27 +626,44 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     cudaMemcpy(d_P, P, size_P, cudaMemcpyHostToDevice);
 
-    //printf("[MEMCHECK] WORKS\n");
+    // Synchronize to make sure the kernel finishes
+    // cudaEventRecord(stopMemoryAllocationX);
+    // cudaEventSynchronize(stopMemoryAllocationX);
+
+    // float allocationXTime = 0.0f;
+    // cudaEventElapsedTime(&allocationXTime, startMemoryAllocationX, stopMemoryAllocationX);
+
+     // Wyświetlanie wyników
+    // std::cout << "Alokacja oraz kopiowanie danych wejściowych na gpu (Tablica X, Alfabet Q, Słowo T, Słowo P): (Time: " << allocationXTime << " ms)" << std::endl;
+
+    // Create CUDA events
+    cudaEvent_t startX, stopX;
+    cudaEventCreate(&startX);
+    cudaEventCreate(&stopX);
+
+    // Record the start event
+    cudaEventRecord(startX);
 
     /* WYWOLUJEMY KERNEL DO OBLICZENIA MACIERZY X */
     calculateXMatrix<<<1, a_len>>>(d_X, d_Q, d_T, a_len, n + 1);
-
+    
     /* SYNCHRONIZACJA */
     cudaDeviceSynchronize();
+
+    // Synchronize to make sure the kernel finishes
+    cudaEventRecord(stopX);
 
     /* KOPIUJEMY PAMIEC */
     cudaMemcpy(X, d_X, size_X, cudaMemcpyDeviceToHost);
 
+    float kernelXtime = 0.0f;
+    cudaEventElapsedTime(&kernelXtime, startX, stopX);
 
-    printf("Macierz X:\n");
-    for(int i = 0; i < a_len; i++){
-        for(int j = 0; j < n + 1; j++) {
-            printf("%d |", X[i * (n + 1) + j]);
-        }
-        printf("\n");
-    }
+    // Wyświetlanie wyników
+    std::cout << "Kernel obliczający macierz X: (Time: " << kernelXtime << " ms)" << std::endl;
 
-    /* === TERAZ MACIERZ D === */
+
+    /* ===================== TERAZ MACIERZ D ======================== */
     // HOST
     int* D = new int[(m + 1)*(n + 1)];
     std::memset(D, 0, (m + 1)*(n + 1)*sizeof(int));
@@ -663,7 +684,7 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     CHECK_CUDA_ERR(cudaMemcpy(d_D, D, size_D, cudaMemcpyHostToDevice));
 
-    /* === TERAZ MACIERZ Op === */
+    /* ============================= TERAZ MACIERZ Op ============================== */
     // HOST
     int* Op = new int[(m + 1)*(n + 1)];
     std::memset(Op, 0, (m + 1)*(n + 1)*sizeof(int));
@@ -684,51 +705,7 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     CHECK_CUDA_ERR(cudaMemcpy(d_Op, Op, size_Op, cudaMemcpyHostToDevice));
 
-    /* === TERAZ MACIERZ JumpLen === */
-    // HOST
-    int* JumpLen = new int[(m + 1)*(n + 1)];
-    std::memset(JumpLen, 0, (m + 1)*(n + 1)*sizeof(int));
-
-
-    // DEVICE POINTER
-    int* d_JumpLen;
-
-    cudaMemGetInfo(&free_mem, &total_mem);
-
-    // ALOKUJEMY
-    size_t size_JumpLen = (m + 1) * (n + 1) * sizeof(int);
-    cudaError_t err4 = cudaMalloc((void**)&d_JumpLen, size_JumpLen);
-    if (err4 != cudaSuccess) {
-        std::cerr << "Failed to allocate memory: " << cudaGetErrorString(err4) << std::endl;
-        return 1;
-    }
-
-    // Copy the array from host to device
-    CHECK_CUDA_ERR(cudaMemcpy(d_JumpLen, JumpLen, size_JumpLen, cudaMemcpyHostToDevice));
-
-    /* === TERAZ MACIERZ JumpSrc === */
-    // HOST
-    int* JumpSrc = new int[(m + 1)*(n + 1)];
-    std::memset(JumpSrc, 0, (m + 1)*(n + 1)*sizeof(int));
-
-
-    // DEVICE POINTER
-    int* d_JumpSrc;
-
-    cudaMemGetInfo(&free_mem, &total_mem);
-
-    // ALOKUJEMY
-    size_t size_JumpSrc = (m + 1) * (n + 1) * sizeof(int);
-    cudaError_t err6 = cudaMalloc((void**)&d_JumpSrc, size_JumpSrc);
-    if (err4 != cudaSuccess) {
-        std::cerr << "Failed to allocate memory: " << cudaGetErrorString(err6) << std::endl;
-        return 1;
-    }
-
-    // Copy the array from host to device
-    CHECK_CUDA_ERR(cudaMemcpy(d_JumpSrc, JumpSrc, size_JumpSrc, cudaMemcpyHostToDevice));
-
-    /* ====================== LAUNCHING COOPERATIVE KERNEL ======================== */
+    /* ======================================= LAUNCHING COOPERATIVE KERNELS ======================================= */
     // We'll assume we need (n + 1) total threads:
     int totalThreads = n + 1;
 
@@ -782,20 +759,20 @@ int main(int argc, char *argv[]) {
         &d_Op,
     };
 
-    printf("================= OUTPUT FROM CPU ===================\n");
+    printf("======================= OUTPUT FROM CPU ==========================\n");
 
-    // auto cpuStart = std::chrono::high_resolution_clock::now();
+    auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    // int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
+    int distance = levenshteinNaiveCPU(T, n, P, m, X, a_len, n+1);
 
-    // auto cpuEnd = std::chrono::high_resolution_clock::now();
+    auto cpuEnd = std::chrono::high_resolution_clock::now();
 
-    // auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
+    auto cpuDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
 
-    // std::cout << "CPU Levenshtein distance = " << distance << "  (";
-    // std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
+    std::cout << "CPU Levenshtein distance = " << distance << "  (";
+    std::cout << "Time: " << cpuDurationMs << " ms)" << std::endl;
 
-    printf("================= OUTPUT FROM ADVANCED KERNEL ===================\n");
+    printf("=================== OUTPUT FROM ADVANCED KERNEL =====================\n");
     
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
@@ -927,8 +904,6 @@ int main(int argc, char *argv[]) {
     /* KOPIUJEMY PAMIEC */
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
     CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
-    CHECK_CUDA_ERR(cudaMemcpy(JumpLen, d_JumpLen, size_JumpLen, cudaMemcpyDeviceToHost));
-    CHECK_CUDA_ERR(cudaMemcpy(JumpSrc, d_JumpSrc, size_JumpSrc, cudaMemcpyDeviceToHost));
 
     // Wyświetlanie wyników
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
@@ -938,34 +913,16 @@ int main(int argc, char *argv[]) {
     cudaEventDestroy(startOps);
     cudaEventDestroy(stopOps);
 
-    /* Wyswietlenie tablicy skoków JumpLen */
-    printf("TABLICA D:\n");
-    for (int i = 0; i < m + 1; i++) {
-        for (int j = 0; j < n + 1; j++) {
-            printf(" %d |", D[i * (n + 1) + j]);
-        }
-        printf("\n");
-    }
-
     /* WYZEROWANIE TABLICY D */
     for (int i = 0; i < m + 1; i++) {
         for (int j = 0; j < n + 1; j++) {
             D[i * (n + 1) + j] = 0;
         }
     }
-
-    /* Wyswietlenie tablicy skoków JumpLen */
-    printf("TABLICA OPERACJI OP:\n");
-    for (int i = 0; i < m + 1; i++) {
-        for (int j = 0; j < n + 1; j++) {
-            printf(" %d |", Op[i * (n + 1) + j]);
-        }
-        printf("\n");
-    }
     
     auto ops = reconstructEditsSingleStep(D, Op, /* JumpLen not used*/ T, P, m, n);
 
-    printTransformations(ops);
+    printTransformationsToFile(ops);
 
     printf("================= OUTPUT FROM NAIVE KERNEL ===================\n");
 
@@ -1003,9 +960,6 @@ int main(int argc, char *argv[]) {
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
 
     // Wyświetlanie wyników
-    // std::cout << "\nAlfabet: " << A_read << " (dlugość: " << a_len << ")" << std::endl;
-    // std::cout << "Słowo 1: " << T_read << " (dlugość: " << n << ")" << std::endl;
-    // std::cout << "Słowo 2: " << P_read << " (dlugość: " << m << ")" << std::endl;
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
     std::cout << "   (Time: " << naiveKernelTimeMs << " ms)" << std::endl;
 
@@ -1018,6 +972,7 @@ int main(int argc, char *argv[]) {
     cudaFree(d_T);
     cudaFree(d_P);
     cudaFree(d_D);
+    cudaFree(d_Op);
 
     // === Zwolnienie pamięci na host (heap)
     delete[] X;
@@ -1025,6 +980,7 @@ int main(int argc, char *argv[]) {
     delete[] T;
     delete[] P;
     delete[] D;
+    delete[] Op;
 
     return 0;
 }
