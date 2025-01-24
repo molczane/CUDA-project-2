@@ -314,6 +314,7 @@ __global__ void calculateDMatrixAdvancedTransformations(int* D, int *X, char *Q,
                 else {
                     Op[i * cols_D + j] = 
                 }
+                
 
                 D[i * cols_D + j] = DVar;
             } 
