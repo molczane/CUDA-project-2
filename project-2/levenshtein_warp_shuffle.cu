@@ -570,6 +570,28 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     CHECK_CUDA_ERR(cudaMemcpy(d_Op, Op, size_Op, cudaMemcpyHostToDevice));
 
+    /* === TERAZ MACIERZ JumpLen === */
+    // HOST
+    int* JumpLen = new int[(m + 1)*(n + 1)];
+    std::memset(JumpLen, 0, (m + 1)*(n + 1)*sizeof(int));
+
+
+    // DEVICE POINTER
+    int* d_JumpLen;
+
+    cudaMemGetInfo(&free_mem, &total_mem);
+
+    // ALOKUJEMY
+    size_t size_JumpLen = (m + 1) * (n + 1) * sizeof(int);
+    cudaError_t err4 = cudaMalloc((void**)&d_JumpLen, size_JumpLen);
+    if (err4 != cudaSuccess) {
+        std::cerr << "Failed to allocate memory: " << cudaGetErrorString(err4) << std::endl;
+        return 1;
+    }
+
+    // Copy the array from host to device
+    CHECK_CUDA_ERR(cudaMemcpy(d_JumpLen, JumpLen, size_JumpLen, cudaMemcpyHostToDevice));
+
     /* ====================== LAUNCHING COOPERATIVE KERNEL ======================== */
     // We'll assume we need (n + 1) total threads:
     int totalThreads = n + 1;
@@ -737,62 +759,62 @@ int main(int argc, char *argv[]) {
 
     printf("================= OUTPUT FROM KERNEL WITH TRANSFORMATIONS ===================\n");
     
-    cudaMemGetInfo(&free_mem, &total_mem);
-    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
-
-    // Create CUDA events
-    cudaEvent_t startOps, stopOps;
-    cudaEventCreate(&startOps);
-    cudaEventCreate(&stopOps);
-
-    // Record the start event
-    cudaEventRecord(startOps);
-
-    cudaError_t err4 = cudaLaunchCooperativeKernel(
-        (void*)calculateDMatrixWithTransformations,
-        grid,
-        block,
-        kernelArgsWithTransformations,
-        sharedMemSize
-    );
-
-    // Synchronize to make sure the kernel finishes
-    cudaEventRecord(stopOps);
-    cudaEventSynchronize(stopOps);
-
-    CHECK_CUDA_ERR(cudaGetLastError());
-    CHECK_CUDA_ERR(cudaDeviceSynchronize());
-
-    float transformationsKernelTimeMs = 0.0f;
-    cudaEventElapsedTime(&transformationsKernelTimeMs, startOps, stopOps);
-
-    /* KOPIUJEMY PAMIEC */
-    CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
-    CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
-
-    // Wyświetlanie wyników
-    std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
-    std::cout << "   (Time: " << transformationsKernelTimeMs << " ms)" << std::endl;
-
-    // Cleanup events
-    cudaEventDestroy(startOps);
-    cudaEventDestroy(stopOps);
-
-    /* WYZEROWANIE TABLICY D */
-    for (int i = 0; i < m + 1; i++) {
-        for (int j = 0; j < n + 1; j++) {
-            D[i * (n + 1) + j] = 0;
-        }
-    }
-
-    /* Wyswietlenie tablicy Op */
-    printf("TABLICA OPERACJI OP:\n");
-    for (int i = 0; i < m + 1; i++) {
-        for (int j = 0; j < n + 1; j++) {
-            printf(" %d |", Op[i * (n + 1) + j]);
-        }
-        printf("\n");
-    }
+//    cudaMemGetInfo(&free_mem, &total_mem);
+//    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
+//
+//    // Create CUDA events
+//    cudaEvent_t startOps, stopOps;
+//    cudaEventCreate(&startOps);
+//    cudaEventCreate(&stopOps);
+//
+//    // Record the start event
+//    cudaEventRecord(startOps);
+//
+//    cudaError_t err4 = cudaLaunchCooperativeKernel(
+//        (void*)calculateDMatrixWithTransformations,
+//        grid,
+//        block,
+//        kernelArgsWithTransformations,
+//        sharedMemSize
+//    );
+//
+//    // Synchronize to make sure the kernel finishes
+//    cudaEventRecord(stopOps);
+//    cudaEventSynchronize(stopOps);
+//
+//    CHECK_CUDA_ERR(cudaGetLastError());
+//    CHECK_CUDA_ERR(cudaDeviceSynchronize());
+//
+//    float transformationsKernelTimeMs = 0.0f;
+//    cudaEventElapsedTime(&transformationsKernelTimeMs, startOps, stopOps);
+//
+//    /* KOPIUJEMY PAMIEC */
+//    CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
+//    CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
+//
+//    // Wyświetlanie wyników
+//    std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
+//    std::cout << "   (Time: " << transformationsKernelTimeMs << " ms)" << std::endl;
+//
+//    // Cleanup events
+//    cudaEventDestroy(startOps);
+//    cudaEventDestroy(stopOps);
+//
+//    /* WYZEROWANIE TABLICY D */
+//    for (int i = 0; i < m + 1; i++) {
+//        for (int j = 0; j < n + 1; j++) {
+//            D[i * (n + 1) + j] = 0;
+//        }
+//    }
+//
+//    /* Wyswietlenie tablicy Op */
+//    printf("TABLICA OPERACJI OP:\n");
+//    for (int i = 0; i < m + 1; i++) {
+//        for (int j = 0; j < n + 1; j++) {
+//            printf(" %d |", Op[i * (n + 1) + j]);
+//        }
+//        printf("\n");
+//    }
 
     printf("================= OUTPUT FROM NAIVE KERNEL ===================\n");
 
