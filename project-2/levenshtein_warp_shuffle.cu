@@ -539,6 +539,7 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     cudaMemcpy(d_Q, Q, size_Q, cudaMemcpyHostToDevice);
 
+    
     /* SLOWO T */
     size_t size_T = n * sizeof(char);
     cudaMalloc((void**)&d_T, size_T);
