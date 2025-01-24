@@ -8,11 +8,17 @@
 
 namespace cg = cooperative_groups;
 
+/* STALE DO ODZYSKANIA SCIEZKI */
+#define MATCH   0
+#define REPLACE 1
+#define INSERT  2
+#define DELETE  3
+#define JUMP    4 // Multi-character jump from X[l, j]
+
 // Maksymalne rozmiary danych
 const int MAX_ALPHABET_SIZE = 100;
 const int MAX_WORD_SIZE = 25200;
 const int THREADS_PER_BLOCK = 1024;
-const int INSERT = 1, DELETE = 2, REPLACE = 3, MATCH = 0, JUMP = 4;
 
 // --------------------------------------------------------------------------- // 
 //                     Error-checking macro for CUDA calls                     //
@@ -247,7 +253,7 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
 /* ==================================================================================== */
 
 /* ======================= CALCULATE D MATRIX KERNEL WITH TRANSFORMATIONS ========================= */
-__global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X, int* Op) {
+__global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X, int* Op, int *JumpLen) {
     /* PREPARATION OF NEEDED DATA */
     cg::grid_group grid = cg::this_grid();
     const int threadIndex = blockIdx.x * blockDim.x + threadIdx.x;
@@ -267,7 +273,9 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
             if(i == 0) { 
                 D[i * cols_D + j] = j;
                 DVar = j;
-                Op[i * cols_D + j] = (j > 0) ? INSERT : MATCH; 
+                // Operation is Insert if j>0, else Match if j=0
+                Op[i*cols_D + j] = (j > 0) ? INSERT : MATCH;
+                JumpLen[i*cols_D + j] = 0;
             }
             else {
                 AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
@@ -276,43 +284,69 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
                 }
 
                 BVar = DVar;
-                int X_l_j = X[l * cols_X + j];
-                CVar = D[(i - 1) * cols_D + X_l_j - 1];
+                // int X_l_j = X[l * cols_X + j];
+                // CVar = D[(i - 1) * cols_D + X_l_j - 1];
                 
+                int X_l_j = X[l * cols_X + j];
+                CVar = INT_MAX;
+
+                if (X_l_j > 0) {
+                    CVar = D[(i - 1) * cols_D + (X_l_j - 1)];
+                }
+
                 if(j == 0) {
                     DVar = i;
-                    Op[i * cols_D + j] = DELETE; // First column: Deletes
+                    Op[i*cols_D + j] = DELETE;
+                    JumpLen[i*cols_D + j] = 0;
                 } 
                 else if (T[j - 1] == P_prev) {
+                    // Match
                     DVar = AVar;
-                    Op[i * cols_D + j] = MATCH; // No operation needed
+                    Op[i*cols_D + j] = MATCH;
+                    JumpLen[i*cols_D + j] = 0;
                 }
                 else if (X_l_j == 0) {
-                    DVar = 1 + min_of_three(AVar, BVar, i + j - 1);
-                    if (DVar == 1 + (i + j - 1)) {
-                        Op[i * cols_D + j] = JUMP;
-                        // JumpLen[i * cols_D + j] = (j - 1); // how many columns we "skipped" in T
-                    }
-                    else if (DVar == AVar + 1) {
-                        Op[i * cols_D + j] = REPLACE;
-                    } else if (DVar == BVar + 1) {
-                        Op[i * cols_D + j] = DELETE;
+                    // We pick the min of (AVar, BVar, i + j - 1) + 1
+                    // If i+j-1 is chosen => JUMP
+                    // else if AVar => REPLACE
+                    // else if BVar => ???
+
+                    int costReplace = AVar + 1;
+                    int costDelete  = BVar + 1;
+                    int costJump    = (i + j - 1) + 1; // multi-step skip
+
+                    DVar = min_of_three(costReplace, costDelete, costJump);
+                    if (DVar == costReplace) {
+                        Op[i*cols_D + j] = REPLACE;
+                        JumpLen[i*cols_D + j] = 0;
+                    } else if (DVar == costDelete) {
+                        Op[i*cols_D + j] = DELETE;
+                        JumpLen[i*cols_D + j] = 0;
                     } else {
-                        Op[i * cols_D + j] = INSERT;
-                    }  
+                        // The JUMP path
+                        Op[i*cols_D + j] = JUMP;
+                        // how many columns are we skipping in T?
+                        // Typically: jumpLen = (j - 1) - (some index?), 
+                        // but if the formula is i + j -1, we might store that as well.
+                        JumpLen[i*cols_D + j] = (i + j - 1); // Example
+                    }
                 }
                 else {
-                    DVar = 1 + min_of_three(AVar, BVar, CVar + (j - 1 - X_l_j));
-                    if (DVar == 1 + (CVar + (j - 1 - X_l_j))) {
-                        Op[i * cols_D + j] = JUMP;
-                        // JumpLen[i * cols_D + j] = (j - 1 - X_l_j); // how many columns we jumped
-                    }
-                    else if (DVar == AVar + 1) {
-                        Op[i * cols_D + j] = REPLACE;
-                    } else if (DVar == BVar + 1) {
-                        Op[i * cols_D + j] = DELETE;
+                    // We pick min( AVar, BVar, CVar + (j-1 - X_l_j ) ) + 1
+                    int costReplace = AVar + 1;
+                    int costDelete  = BVar + 1;
+                    int costJump    = CVar + (j - 1 - X_l_j) + 1;
+
+                    DVar = min_of_three(costReplace, costDelete, costJump);
+                    if (DVar == costReplace) {
+                        Op[i*cols_D + j] = REPLACE;
+                        JumpLen[i*cols_D + j] = 0;
+                    } else if (DVar == costDelete) {
+                        Op[i*cols_D + j] = DELETE;
+                        JumpLen[i*cols_D + j] = 0;
                     } else {
-                        Op[i * cols_D + j] = INSERT;
+                        Op[i*cols_D + j] = JUMP;
+                        JumpLen[i*cols_D + j] = (j - 1 - X_l_j);
                     }
                 }
 
@@ -528,6 +562,15 @@ int main(int argc, char *argv[]) {
     /* KOPIUJEMY PAMIEC */
     cudaMemcpy(X, d_X, size_X, cudaMemcpyDeviceToHost);
 
+
+    printf("Macierz X:\n");
+    for(int i = 0; i < a_len; i++){
+        for(int j = 0; j < n + 1; j++) {
+            printf("%d |", X[i * (n + 1) + j]);
+        }
+        printf("\n");
+    }
+
     /* === TERAZ MACIERZ D === */
     // HOST
     int* D = new int[(m + 1)*(n + 1)];
@@ -643,7 +686,8 @@ int main(int argc, char *argv[]) {
         &cols_D,
         &rows_X,
         &cols_X,
-        &d_Op
+        &d_Op,
+        &d_JumpLen
     };
 
     printf("================= OUTPUT FROM CPU ===================\n");
@@ -759,62 +803,71 @@ int main(int argc, char *argv[]) {
 
     printf("================= OUTPUT FROM KERNEL WITH TRANSFORMATIONS ===================\n");
     
-//    cudaMemGetInfo(&free_mem, &total_mem);
-//    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
-//
-//    // Create CUDA events
-//    cudaEvent_t startOps, stopOps;
-//    cudaEventCreate(&startOps);
-//    cudaEventCreate(&stopOps);
-//
-//    // Record the start event
-//    cudaEventRecord(startOps);
-//
-//    cudaError_t err4 = cudaLaunchCooperativeKernel(
-//        (void*)calculateDMatrixWithTransformations,
-//        grid,
-//        block,
-//        kernelArgsWithTransformations,
-//        sharedMemSize
-//    );
-//
-//    // Synchronize to make sure the kernel finishes
-//    cudaEventRecord(stopOps);
-//    cudaEventSynchronize(stopOps);
-//
-//    CHECK_CUDA_ERR(cudaGetLastError());
-//    CHECK_CUDA_ERR(cudaDeviceSynchronize());
-//
-//    float transformationsKernelTimeMs = 0.0f;
-//    cudaEventElapsedTime(&transformationsKernelTimeMs, startOps, stopOps);
-//
-//    /* KOPIUJEMY PAMIEC */
-//    CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
-//    CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
-//
-//    // Wyświetlanie wyników
-//    std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
-//    std::cout << "   (Time: " << transformationsKernelTimeMs << " ms)" << std::endl;
-//
-//    // Cleanup events
-//    cudaEventDestroy(startOps);
-//    cudaEventDestroy(stopOps);
-//
-//    /* WYZEROWANIE TABLICY D */
-//    for (int i = 0; i < m + 1; i++) {
-//        for (int j = 0; j < n + 1; j++) {
-//            D[i * (n + 1) + j] = 0;
-//        }
-//    }
-//
-//    /* Wyswietlenie tablicy Op */
-//    printf("TABLICA OPERACJI OP:\n");
-//    for (int i = 0; i < m + 1; i++) {
-//        for (int j = 0; j < n + 1; j++) {
-//            printf(" %d |", Op[i * (n + 1) + j]);
-//        }
-//        printf("\n");
-//    }
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
+
+    // Create CUDA events
+    cudaEvent_t startOps, stopOps;
+    cudaEventCreate(&startOps);
+    cudaEventCreate(&stopOps);
+
+    // Record the start event
+    cudaEventRecord(startOps);
+
+    cudaError_t err5 = cudaLaunchCooperativeKernel(
+        (void*)calculateDMatrixWithTransformations,
+        grid,
+        block,
+        kernelArgsWithTransformations,
+        sharedMemSize
+    );
+
+    // Synchronize to make sure the kernel finishes
+    cudaEventRecord(stopOps);
+    cudaEventSynchronize(stopOps);
+
+    CHECK_CUDA_ERR(cudaGetLastError());
+    CHECK_CUDA_ERR(cudaDeviceSynchronize());
+
+    float transformationsKernelTimeMs = 0.0f;
+    cudaEventElapsedTime(&transformationsKernelTimeMs, startOps, stopOps);
+
+    /* KOPIUJEMY PAMIEC */
+    CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
+
+    // Wyświetlanie wyników
+    std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
+    std::cout << "   (Time: " << transformationsKernelTimeMs << " ms)" << std::endl;
+
+    // Cleanup events
+    cudaEventDestroy(startOps);
+    cudaEventDestroy(stopOps);
+
+    /* WYZEROWANIE TABLICY D */
+    for (int i = 0; i < m + 1; i++) {
+        for (int j = 0; j < n + 1; j++) {
+            D[i * (n + 1) + j] = 0;
+        }
+    }
+
+    /* Wyswietlenie tablicy skoków JumpLen */
+    printf("TABLICA OPERACJI OP:\n");
+    for (int i = 0; i < m + 1; i++) {
+        for (int j = 0; j < n + 1; j++) {
+            printf(" %d |", Op[i * (n + 1) + j]);
+        }
+        printf("\n");
+    }
+
+    /* Wyswietlenie tablicy skoków JumpLen */
+    printf("TABLICA skokow JumpLen:\n");
+    for (int i = 0; i < m + 1; i++) {
+        for (int j = 0; j < n + 1; j++) {
+            printf(" %d |", JumpLen[i * (n + 1) + j]);
+        }
+        printf("\n");
+    }
 
     printf("================= OUTPUT FROM NAIVE KERNEL ===================\n");
 
