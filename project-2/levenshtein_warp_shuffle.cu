@@ -5,6 +5,7 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono> 
+#include <vector>
 
 namespace cg = cooperative_groups;
 
@@ -252,8 +253,8 @@ __global__ void calculateDMatrixAdvanced(int* D, int *X, char *Q, char *T, char 
 }
 /* ==================================================================================== */
 
-/* ======================= CALCULATE D MATRIX KERNEL WITH TRANSFORMATIONS ========================= */
-__global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X, int* Op, int *JumpLen) {
+/* ======================= CALCULATE D MATRIX KERNEL ADVANCED ========================= */
+__global__ void calculateDMatrixAdvancedTransformations(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X, int* Op) {
     /* PREPARATION OF NEEDED DATA */
     cg::grid_group grid = cg::this_grid();
     const int threadIndex = blockIdx.x * blockDim.x + threadIdx.x;
@@ -261,8 +262,10 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
     const int j = threadIndex;
 
      /* Deklaracja AVar, BVar, CVar, DVar */
-    int AVar, BVar, CVar, DVar;
-
+    int AVar;
+    int BVar;
+    int CVar;
+    int DVar;
     if (j < cols_D) {
         for(int i = 0; i < rows_D; i++) {
             // Calculate l directly using ASCII values
@@ -272,82 +275,44 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
             // THIS CALCULATES LEVENSHTEIN DISTANCE
             if(i == 0) { 
                 D[i * cols_D + j] = j;
-                DVar = j;
-                // Operation is Insert if j>0, else Match if j=0
-                Op[i*cols_D + j] = (j > 0) ? INSERT : MATCH;
-                JumpLen[i*cols_D + j] = 0;
+                DVar = j; 
             }
             else {
-                AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
-                if(j % warpSize == 0) {
+                if(j == 0 || j % warpSize != 0) {
+                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                }   
+                else if(j % warpSize == 0) {
+                    AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
                     AVar = D[(i - 1) * cols_D + (j - 1)];
                 }
+                // else {
+                //     AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                // }
 
                 BVar = DVar;
-                // int X_l_j = X[l * cols_X + j];
-                // CVar = D[(i - 1) * cols_D + X_l_j - 1];
-                
                 int X_l_j = X[l * cols_X + j];
-                CVar = INT_MAX;
-
-                if (X_l_j > 0) {
-                    CVar = D[(i - 1) * cols_D + (X_l_j - 1)];
-                }
-
+                CVar = D[(i - 1) * cols_D + X_l_j - 1];
+                
                 if(j == 0) {
                     DVar = i;
-                    Op[i*cols_D + j] = DELETE;
-                    JumpLen[i*cols_D + j] = 0;
                 } 
                 else if (T[j - 1] == P_prev) {
-                    // Match
                     DVar = AVar;
-                    Op[i*cols_D + j] = MATCH;
-                    JumpLen[i*cols_D + j] = 0;
                 }
                 else if (X_l_j == 0) {
-                    // We pick the min of (AVar, BVar, i + j - 1) + 1
-                    // If i+j-1 is chosen => JUMP
-                    // else if AVar => REPLACE
-                    // else if BVar => ???
-
-                    int costReplace = AVar + 1;
-                    int costDelete  = BVar + 1;
-                    int costJump    = (i + j - 1) + 1; // multi-step skip
-
-                    DVar = min_of_three(costReplace, costDelete, costJump);
-                    if (DVar == costReplace) {
-                        Op[i*cols_D + j] = REPLACE;
-                        JumpLen[i*cols_D + j] = 0;
-                    } else if (DVar == costDelete) {
-                        Op[i*cols_D + j] = DELETE;
-                        JumpLen[i*cols_D + j] = 0;
-                    } else {
-                        // The JUMP path
-                        Op[i*cols_D + j] = JUMP;
-                        // how many columns are we skipping in T?
-                        // Typically: jumpLen = (j - 1) - (some index?), 
-                        // but if the formula is i + j -1, we might store that as well.
-                        JumpLen[i*cols_D + j] = (i + j - 1); // Example
-                    }
+                    DVar = 1 + min_of_three(AVar, BVar, i + j - 1);
                 }
                 else {
-                    // We pick min( AVar, BVar, CVar + (j-1 - X_l_j ) ) + 1
-                    int costReplace = AVar + 1;
-                    int costDelete  = BVar + 1;
-                    int costJump    = CVar + (j - 1 - X_l_j) + 1;
-
-                    DVar = min_of_three(costReplace, costDelete, costJump);
-                    if (DVar == costReplace) {
-                        Op[i*cols_D + j] = REPLACE;
-                        JumpLen[i*cols_D + j] = 0;
-                    } else if (DVar == costDelete) {
-                        Op[i*cols_D + j] = DELETE;
-                        JumpLen[i*cols_D + j] = 0;
-                    } else {
-                        Op[i*cols_D + j] = JUMP;
-                        JumpLen[i*cols_D + j] = (j - 1 - X_l_j);
-                    }
+                    DVar = 1 + min_of_three(AVar, BVar, CVar + (j - 1 - X_l_j));
+                }
+                
+                if(DVar == AVar) {
+                    Op[i * cols_D + j] = REPLACE;
+                } else if(DVar == BVar) {
+                    Op[i * cols_D + j] = DELETE;
+                }
+                else {
+                    Op[i * cols_D + j] = 
                 }
 
                 D[i * cols_D + j] = DVar;
@@ -357,6 +322,338 @@ __global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, cha
             grid.sync();
         }
     }
+}
+/* ==================================================================================== */
+
+/* ======================= CALCULATE D MATRIX KERNEL WITH TRANSFORMATIONS REFINED ========================= */
+__global__
+void calculateDMatrixWithTransformationsRefined(
+    int* D, int* X,
+    char* Q, char* T, char* P,
+    int rows_D, int cols_D,
+    int rows_X, int cols_X,
+    int* Op, int* JumpLen, int* JumpSrc)
+{
+    cg::grid_group grid = cg::this_grid();
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (j < cols_D) {
+        int DVar = 0; // local register for D[i,j]
+        for(int i = 0; i < rows_D; i++) {
+
+            // 1) For i=0: only Insert or Match(=0)
+            if (i == 0) {
+                DVar = j;
+                D[i*cols_D + j] = j;
+                Op[i*cols_D + j] = (j>0)? INSERT : MATCH;
+                JumpLen[i*cols_D + j] = 0;
+                JumpSrc[i*cols_D + j] = -1;
+            }
+            else {
+                // fetch the diagonal / top / etc using warp shuffle or global
+                int AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                if (j % warpSize == 0) {
+                    // diagonal from global
+                    AVar = D[(i-1)*cols_D + (j-1)];
+                }
+
+                int BVar = DVar; // top ( = D[i-1, j] ) ?
+
+                // get X[l,j]
+                int P_prev = P[i-1];
+                int l = (P_prev >= 'A' && P_prev <= 'Z')? (P_prev - 'A') : -1;
+                int X_l_j = (l<0)? 0 : X[l*cols_X + j];
+
+                int cval = INT_MAX;
+                if (X_l_j > 0) {
+                    cval = D[(i-1)*cols_D + (X_l_j-1)];
+                }
+
+                // boundary if (j==0)
+                if (j==0) {
+                    DVar = i;  // cost is i
+                    Op[i*cols_D + j] = DELETE;
+                    JumpLen[i*cols_D + j] = 0;
+                    JumpSrc[i*cols_D + j] = -1;
+                }
+                else {
+                    // check if T[j-1] == P[i-1]
+                    if (T[j-1] == P[i-1]) {
+                        // MATCH
+                        DVar = AVar; // no cost
+                        Op[i*cols_D + j] = MATCH;
+                        JumpLen[i*cols_D + j] = 0;
+                        JumpSrc[i*cols_D + j] = -1;
+                    } else {
+                        // single-step costs
+                        int costReplace = AVar + 1; // diagonal => replace
+                        int costDelete  = BVar + 1; // top => delete
+                        
+                        // multi-step jump if X_l_j == 0 or X_l_j>0
+                        // - first path: i + j -1 => skip from col=0..(j-1)
+                        int costJump1 = ( (i + (j)) -1 ) + 1; 
+                          // or i+j-1+1
+                        
+                        // - second path: cval + ( (j-1) - X_l_j ) +1
+                        // only if X_l_j>0
+                        int costJump2 = INT_MAX;
+                        if (X_l_j>0) {
+                            costJump2 = cval + ((j-1) - (X_l_j)) + 1;
+                        }
+
+                        // pick the min
+                        int costAll[] = { costReplace, costDelete, costJump1, costJump2 };
+                        int minCost = costAll[0];
+                        int minIndex = 0;
+                        for (int k=1; k<4; k++){
+                            if (costAll[k] < minCost){
+                                minCost = costAll[k];
+                                minIndex= k;
+                            }
+                        }
+                        DVar = minCost;
+
+                        // now set Op
+                        switch(minIndex) {
+                        case 0: // costReplace
+                            Op[i*cols_D + j] = REPLACE;
+                            JumpLen[i*cols_D + j] = 0;
+                            JumpSrc[i*cols_D + j] = -1;
+                            break;
+                        case 1: // costDelete
+                            Op[i*cols_D + j] = DELETE;
+                            JumpLen[i*cols_D + j] = 0;
+                            JumpSrc[i*cols_D + j] = -1;
+                            break;
+                        case 2: // costJump1 => i+j-1
+                            Op[i*cols_D + j] = JUMP;
+                            JumpLen[i*cols_D + j] = (j-1); // skipping j-1 columns
+                            JumpSrc[i*cols_D + j] = 0;     // from col=0
+                            break;
+                        case 3: // costJump2 => cval + ...
+                            Op[i*cols_D + j] = JUMP;
+                            int skipSize = (j-1) - (X_l_j);
+                            JumpLen[i*cols_D + j] = skipSize;
+                            JumpSrc[i*cols_D + j] = (X_l_j-1);
+                            break;
+                        }
+                    }
+                }
+                // store DVar
+                D[i*cols_D + j] = DVar;
+            }
+
+            // grid-wide synchronization
+            grid.sync();
+        }
+    }
+}
+/* ===================================================================================================================== */
+
+/* ======================= CALCULATE D MATRIX KERNEL WITH TRANSFORMATIONS ========================= */
+__global__ void calculateDMatrixWithTransformations(int* D, int *X, char *Q, char *T, char *P, int rows_D, int cols_D, int rows_X, int cols_X, int* Op, int *JumpLen) {
+    cg::grid_group grid = cg::this_grid();
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (j < cols_D) {
+        int DVar = 0;
+        for(int i = 0; i < rows_D; i++) {
+            if(i == 0) {
+                // first row => Insert or Match(=0)
+                DVar = j;
+                D[i*cols_D + j] = DVar;
+                Op[i*cols_D + j] = (j>0) ? INSERT : MATCH;
+            }
+            else {
+                // get diagonal, top, etc.
+                int AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+                if (j % warpSize == 0) {
+                    AVar = D[(i-1)*cols_D + (j-1)];
+                }
+                int BVar = DVar;  // interpret as D[i-1,j]
+
+                // retrieve X[l,j]
+                int P_prev = P[i - 1];
+                int l = ((P_prev >= 'A' && P_prev <= 'Z')? (P_prev - 'A') : -1);
+                int X_l_j = (l<0)? 0 : X[l * cols_X + j];
+
+                int CVar = INT_MAX;
+                if (X_l_j > 0) {
+                    // read D[i-1, X_l_j-1]
+                    CVar = D[(i-1)*cols_D + (X_l_j-1)];
+                }
+
+                // boundary for j=0 => all Delete
+                if (j == 0) {
+                    DVar = i;
+                    D[i*cols_D + j] = i;
+                    Op[i*cols_D + j] = DELETE;
+                }
+                else {
+                    // check match
+                    if (T[j-1] == P_prev) {
+                        DVar = AVar; 
+                        Op[i*cols_D + j] = MATCH;
+                    }
+                    else {
+                        // single-step ops
+                        int costReplace = AVar + 1; // diagonal => replace
+                        int costDelete  = BVar + 1; // top => delete
+
+                        // multi-step jumps
+                        //  1) costJump1 => i + j -1 path
+                        int costJump1 = INT_MAX;
+                        {
+                            int candidate = (i + j - 1) + 1;
+                            // only pick it if it's strictly smaller than single-step
+                            if (candidate < costReplace && candidate < costDelete) {
+                                costJump1 = candidate;
+                            }
+                        }
+                        //  2) costJump2 => CVar + ( (j-1) - X_l_j ) +1
+                        int costJump2 = INT_MAX;
+                        if (X_l_j>0) {
+                            int candidate = CVar + ((j-1)-(X_l_j)) +1;
+                            // only pick if smaller
+                            if (candidate < costReplace && candidate < costDelete) {
+                                costJump2 = candidate;
+                            }
+                        }
+
+                        // pick best of 4
+                        int bestCost = costReplace;
+                        int bestOp   = REPLACE;
+                        int bestJumpLen = 0;
+
+                        if (costDelete < bestCost) {
+                            bestCost = costDelete;
+                            bestOp   = DELETE;
+                        }
+                        if (costJump1 < bestCost) {
+                            bestCost = costJump1;
+                            bestOp   = JUMP;
+                            // skipping from col=0 up to j-1
+                            bestJumpLen = (j-1); 
+                        }
+                        if (costJump2 < bestCost) {
+                            bestCost = costJump2;
+                            bestOp   = JUMP;
+                            bestJumpLen = (j-1) - (X_l_j);
+                        }
+
+                        DVar = bestCost;
+                        D[i*cols_D + j] = bestCost;
+                        Op[i*cols_D + j] = bestOp;
+                        JumpLen[i*cols_D + j] = bestJumpLen;
+                    }
+                }
+            }
+            grid.sync();
+        }
+    }
+    // /* PREPARATION OF NEEDED DATA */
+    // cg::grid_group grid = cg::this_grid();
+    // const int threadIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    // // kolumna ktora bedziemy przetwarzac
+    // const int j = threadIndex;
+
+    //  /* Deklaracja AVar, BVar, CVar, DVar */
+    // int AVar, BVar, CVar, DVar;
+
+    // if (j < cols_D) {
+    //     for(int i = 0; i < rows_D; i++) {
+    //         // Calculate l directly using ASCII values
+    //         int P_prev = P[i - 1];
+    //         int l = (i > 0 && P_prev >= 'A' && P_prev <= 'Z') ? (P_prev - 'A') : -1;
+
+    //         // THIS CALCULATES LEVENSHTEIN DISTANCE
+    //         if(i == 0) { 
+    //             D[i * cols_D + j] = j;
+    //             DVar = j;
+    //             // Operation is Insert if j>0, else Match if j=0
+    //             Op[i*cols_D + j] = (j > 0) ? INSERT : MATCH;
+    //             JumpLen[i*cols_D + j] = 0;
+    //         }
+    //         else {
+    //             AVar = __shfl_up_sync(0xFFFFFFFF, DVar, 1);
+    //             if(j % warpSize == 0) {
+    //                 AVar = D[(i - 1) * cols_D + (j - 1)];
+    //             }
+
+    //             BVar = DVar;
+    //             // int X_l_j = X[l * cols_X + j];
+    //             // CVar = D[(i - 1) * cols_D + X_l_j - 1];
+                
+    //             int X_l_j = X[l * cols_X + j];
+    //             CVar = INT_MAX;
+
+    //             if (X_l_j > 0) {
+    //                 CVar = D[(i - 1) * cols_D + (X_l_j - 1)];
+    //             }
+
+    //             if(j == 0) {
+    //                 DVar = i;
+    //                 Op[i*cols_D + j] = DELETE;
+    //                 JumpLen[i*cols_D + j] = 0;
+    //             } 
+    //             else if (T[j - 1] == P_prev) {
+    //                 // Match
+    //                 DVar = AVar;
+    //                 Op[i*cols_D + j] = MATCH;
+    //                 JumpLen[i*cols_D + j] = 0;
+    //             }
+    //             else if (X_l_j == 0) {
+    //                 // We pick the min of (AVar, BVar, i + j - 1) + 1
+    //                 // If i+j-1 is chosen => JUMP
+    //                 // else if AVar => REPLACE
+    //                 // else if BVar => ???
+
+    //                 int costReplace = AVar + 1;
+    //                 int costDelete  = BVar + 1;
+    //                 int costJump    = (i + j - 1) + 1; // multi-step skip
+
+    //                 DVar = min_of_three(costReplace, costDelete, costJump);
+    //                 if (DVar == costReplace) {
+    //                     Op[i*cols_D + j] = REPLACE;
+    //                     JumpLen[i*cols_D + j] = 0;
+    //                 } else if (DVar == costDelete) {
+    //                     Op[i*cols_D + j] = DELETE;
+    //                     JumpLen[i*cols_D + j] = 0;
+    //                 } else {
+    //                     // The JUMP path
+    //                     Op[i*cols_D + j] = JUMP;
+    //                     // how many columns are we skipping in T?
+    //                     // Typically: jumpLen = (j - 1) - (some index?), 
+    //                     // but if the formula is i + j -1, we might store that as well.
+    //                     JumpLen[i*cols_D + j] = (i + j - 1); // Example
+    //                 }
+    //             }
+    //             else {
+    //                 // We pick min( AVar, BVar, CVar + (j-1 - X_l_j ) ) + 1
+    //                 int costReplace = AVar + 1;
+    //                 int costDelete  = BVar + 1;
+    //                 int costJump    = CVar + (j - 1 - X_l_j) + 1;
+
+    //                 DVar = min_of_three(costReplace, costDelete, costJump);
+    //                 if (DVar == costReplace) {
+    //                     Op[i*cols_D + j] = REPLACE;
+    //                     JumpLen[i*cols_D + j] = 0;
+    //                 } else if (DVar == costDelete) {
+    //                     Op[i*cols_D + j] = DELETE;
+    //                     JumpLen[i*cols_D + j] = 0;
+    //                 } else {
+    //                     Op[i*cols_D + j] = JUMP;
+    //                     JumpLen[i*cols_D + j] = (j - 1 - X_l_j);
+    //                 }
+    //             }
+
+    //             D[i * cols_D + j] = DVar;
+    //         } 
+            
+    //         // synchronizujemy wszystkie watki w obrebie gridu
+    //         grid.sync();
+    //     }
+    // }
 }
 /* ==================================================================================== */
 
@@ -455,6 +752,83 @@ __global__ void calculateDMatrixShared(int* D, int *X, char *Q, char *T, char *P
 }
 /* ==================================================================================== */
 
+/* ========================== FUNCTION TO RETRIEVE LIST OF EDITS FROM DATA THAT WE HAVE ============================ */
+std::vector<std::string> reconstructEdits(
+    int *D, int *Op, int *JumpLen, int *JumpSrc,
+    const char *T, const char *P,
+    int m, int n, int cols_D)
+{
+    std::vector<std::string> ops;
+    int i = m, j = n;
+
+    while (i>0 || j>0) {
+        int op = Op[i*cols_D + j];
+        switch(op) {
+        case MATCH:
+            // T[j-1] == P[i-1], no cost
+            ops.push_back("MATCH("+std::string(1,T[j-1])+")");
+            i--; j--;
+            break;
+        case REPLACE:
+            ops.push_back("REPLACE("+std::string(1,T[j-1])+" -> "+std::string(1,P[i-1])+")");
+            i--; j--;
+            break;
+        case INSERT:
+            // Insert T[j-1], or Insert char from P?
+            // depends on your definition, but typically:
+            ops.push_back("INSERT("+std::string(1,T[j-1])+")");
+            j--;
+            break;
+        case DELETE:
+            // Delete T[j-1]
+            ops.push_back("DELETE("+std::string(1,T[j-1])+")");
+            i--;
+            break;
+        case JUMP:
+            {
+                int jumpSize = JumpLen[i*cols_D + j];
+                int srcCol   = JumpSrc[i*cols_D + j];
+                // This path lumps multiple "Delete" or "skip" operations
+                // We'll skip "jumpSize" columns from T
+                // Example: if srcCol=0, we do (j-1) times "Delete"
+                // or if srcCol=(X_l_j-1), we do ( j-1 - srcCol ) deletes
+                if (srcCol == 0) {
+                    // skip j-1 columns
+                    for (int step=0; step< jumpSize; step++){
+                        int colToDelete = j -1 - step; // from right to left
+                        ops.push_back("DELETE("+std::string(1,T[colToDelete])+")");
+                    }
+                    j -= jumpSize;
+                } else {
+                    // skip from col= (srcCol) to col=(j-1)
+                    // i.e. jumpSize = (j-1 - srcCol)
+                    for (int step=0; step< jumpSize; step++){
+                        int colToDelete = j -1 - step;
+                        ops.push_back("DELETE("+std::string(1,T[colToDelete])+")");
+                    }
+                    j -= jumpSize; // j moves left
+                }
+                // row i always moves up by 1 for a jump
+                i--;
+            }
+            break;
+        }
+    }
+    // Reverse ops to get them from first -> last
+    std::reverse(ops.begin(), ops.end());
+    return ops;
+}
+/* ============================================================================================================= */
+
+/* ===================== FUNCTION TO PRINT LIST OF TRANSFORMATIONS ===================== */
+void printTransformations(const std::vector<std::string>& ops) {
+    std::cout << "List of transformations:\n";
+    for (size_t i = 0; i < ops.size(); i++) {
+        std::cout << i+1 << ". " << ops[i] << "\n";
+    }
+}
+/* ===================================================================================== */
+
 /* ====================================== MAIN ======================================== */
 int main(int argc, char *argv[]) {
     // Sprawdzanie liczby argumentów
@@ -540,7 +914,7 @@ int main(int argc, char *argv[]) {
     cudaMemcpy(d_Q, Q, size_Q, cudaMemcpyHostToDevice);
 
 
-    
+
     /* SLOWO T */
     size_t size_T = n * sizeof(char);
     cudaMalloc((void**)&d_T, size_T);
@@ -637,6 +1011,28 @@ int main(int argc, char *argv[]) {
     // Copy the array from host to device
     CHECK_CUDA_ERR(cudaMemcpy(d_JumpLen, JumpLen, size_JumpLen, cudaMemcpyHostToDevice));
 
+    /* === TERAZ MACIERZ JumpSrc === */
+    // HOST
+    int* JumpSrc = new int[(m + 1)*(n + 1)];
+    std::memset(JumpSrc, 0, (m + 1)*(n + 1)*sizeof(int));
+
+
+    // DEVICE POINTER
+    int* d_JumpSrc;
+
+    cudaMemGetInfo(&free_mem, &total_mem);
+
+    // ALOKUJEMY
+    size_t size_JumpSrc = (m + 1) * (n + 1) * sizeof(int);
+    cudaError_t err6 = cudaMalloc((void**)&d_JumpSrc, size_JumpSrc);
+    if (err4 != cudaSuccess) {
+        std::cerr << "Failed to allocate memory: " << cudaGetErrorString(err6) << std::endl;
+        return 1;
+    }
+
+    // Copy the array from host to device
+    CHECK_CUDA_ERR(cudaMemcpy(d_JumpSrc, JumpSrc, size_JumpSrc, cudaMemcpyHostToDevice));
+
     /* ====================== LAUNCHING COOPERATIVE KERNEL ======================== */
     // We'll assume we need (n + 1) total threads:
     int totalThreads = n + 1;
@@ -690,6 +1086,22 @@ int main(int argc, char *argv[]) {
         &cols_X,
         &d_Op,
         &d_JumpLen
+    };
+
+    // Kernel arguments
+    void* kernelArgsWithTransformationsRefined[] = {
+        &d_D,
+        &d_X,
+        &d_Q,
+        &d_T,
+        &d_P,
+        &rows_D,
+        &cols_D,
+        &rows_X,
+        &cols_X,
+        &d_Op,
+        &d_JumpLen,
+        &d_JumpSrc
     };
 
     printf("================= OUTPUT FROM CPU ===================\n");
@@ -803,7 +1215,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    printf("================= OUTPUT FROM KERNEL WITH TRANSFORMATIONS ===================\n");
+    printf("================= OUTPUT FROM KERNEL WITH TRANSFORMATIONS REFINED ===================\n");
     
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[MEMCHECK] Free memory: %zu MB, Total memory: %zu MB\n", free_mem / (1024 * 1024), total_mem / (1024 * 1024));
@@ -817,10 +1229,10 @@ int main(int argc, char *argv[]) {
     cudaEventRecord(startOps);
 
     cudaError_t err5 = cudaLaunchCooperativeKernel(
-        (void*)calculateDMatrixWithTransformations,
+        (void*)calculateDMatrixWithTransformationsRefined,
         grid,
         block,
-        kernelArgsWithTransformations,
+        kernelArgsWithTransformationsRefined,
         sharedMemSize
     );
 
@@ -837,6 +1249,8 @@ int main(int argc, char *argv[]) {
     /* KOPIUJEMY PAMIEC */
     CHECK_CUDA_ERR(cudaMemcpy(D, d_D, size_D, cudaMemcpyDeviceToHost));
     CHECK_CUDA_ERR(cudaMemcpy(Op, d_Op, size_Op, cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERR(cudaMemcpy(JumpLen, d_JumpLen, size_JumpLen, cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERR(cudaMemcpy(JumpSrc, d_JumpSrc, size_JumpSrc, cudaMemcpyDeviceToHost));
 
     // Wyświetlanie wyników
     std::cout << "Odległość Levenshteina: " << D[(m + 1) * (n + 1) - 1] << std::endl;
@@ -845,6 +1259,15 @@ int main(int argc, char *argv[]) {
     // Cleanup events
     cudaEventDestroy(startOps);
     cudaEventDestroy(stopOps);
+
+    /* Wyswietlenie tablicy skoków JumpLen */
+    printf("TABLICA D:\n");
+    for (int i = 0; i < m + 1; i++) {
+        for (int j = 0; j < n + 1; j++) {
+            printf(" %d |", D[i * (n + 1) + j]);
+        }
+        printf("\n");
+    }
 
     /* WYZEROWANIE TABLICY D */
     for (int i = 0; i < m + 1; i++) {
@@ -870,6 +1293,21 @@ int main(int argc, char *argv[]) {
         }
         printf("\n");
     }
+
+    /* Wyswietlenie tablicy skoków JumpLen */
+    printf("TABLICA JumpSrc:\n");
+    for (int i = 0; i < m + 1; i++) {
+        for (int j = 0; j < n + 1; j++) {
+            printf(" %d |", JumpSrc[i * (n + 1) + j]);
+        }
+        printf("\n");
+    }
+    
+    auto ops = reconstructEdits(
+        D, Op, JumpLen, JumpSrc, T, P, m, n, n + 1
+    );
+
+    printTransformations(ops);
 
     printf("================= OUTPUT FROM NAIVE KERNEL ===================\n");
 
